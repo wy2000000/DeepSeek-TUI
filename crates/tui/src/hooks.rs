@@ -1051,8 +1051,8 @@ impl HookExecutor {
         let env = env_vars.clone();
         let wd = working_dir.clone();
 
-        // Spawn in a blocking task (respects tokio's thread pool limits).
-        tokio::task::spawn_blocking(move || {
+        // Spawn in a detached thread (fire-and-forget hook execution).
+        std::thread::spawn(move || {
             let mut command = HookExecutor::build_shell_command(&cmd);
             command
                 .current_dir(&wd)
