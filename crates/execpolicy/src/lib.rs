@@ -448,7 +448,8 @@ impl ExecPolicyEngine {
 fn normalize_command(value: &str) -> String {
     // Normalize: lowercase, collapse internal whitespace to single spaces.
     // This prevents bypass via "git  status" (double space) vs "git status".
-    value.split_whitespace()
+    value
+        .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
         .to_ascii_lowercase()

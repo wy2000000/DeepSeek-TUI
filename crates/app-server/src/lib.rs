@@ -289,10 +289,7 @@ async fn tool_handler(
             })
             .unwrap_or(codewhale_execpolicy::AskForApproval::OnRequest)
     };
-    match runtime
-        .invoke_tool(req.call, approval_mode, &cwd)
-        .await
-    {
+    match runtime.invoke_tool(req.call, approval_mode, &cwd).await {
         Ok(value) => Json(value),
         Err(err) => Json(json!({ "ok": false, "error": err.to_string() })),
     }
