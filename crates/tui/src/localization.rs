@@ -1513,10 +1513,10 @@ fn english(id: MessageId) -> &'static str {
         MessageId::ApprovalCategoryMcpRead => "MCP Read",
         MessageId::ApprovalCategoryMcpAction => "MCP Action",
         MessageId::ApprovalCategoryUnknown => "Unknown",
-        MessageId::ApprovalFieldType => "Type:",
-        MessageId::ApprovalFieldAbout => "About:",
-        MessageId::ApprovalFieldImpact => "Impact:",
-        MessageId::ApprovalFieldParams => "Params:",
+        MessageId::ApprovalFieldType => "Type: ",
+        MessageId::ApprovalFieldAbout => "About:  ",
+        MessageId::ApprovalFieldImpact => "Impact: ",
+        MessageId::ApprovalFieldParams => "Params: ",
         MessageId::ApprovalOptionApproveOnce => "Approve once",
         MessageId::ApprovalOptionApproveAlways => "Approve always for this kind",
         MessageId::ApprovalOptionDeny => "Deny this call",
@@ -1524,9 +1524,7 @@ fn english(id: MessageId) -> &'static str {
         MessageId::ApprovalBlockTitle => "approval",
         MessageId::ApprovalControlsHint => "  ·  v: full params  ·  Esc: abort",
         MessageId::ApprovalChooseHint => "Choose: ",
-        MessageId::ApprovalChooseAction => {
-            "Enter selected option, or press y/a/d directly"
-        }
+        MessageId::ApprovalChooseAction => "Enter selected option, or press y/a/d directly",
         MessageId::ApprovalIntentLabel => "Intent: ",
         MessageId::ApprovalMoreLines => "  … (+{count} lines)",
 
