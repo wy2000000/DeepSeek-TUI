@@ -328,15 +328,8 @@ impl DeepSeekClient {
                                     });
                                 }
                             }
-                            "error" => {
-                                let msg = event
-                                    .get("message")
-                                    .and_then(|m| m.as_str())
-                                    .unwrap_or("Unknown error");
-                                let code = event
-                                    .get("code")
-                                    .and_then(|c| c.as_str())
-                                    .unwrap_or("unknown");
+                            "error" | "response.failed" | "response.incomplete" => {
+                                let (code, msg) = responses_event_error_details(&event);
                                 yield Err(anyhow::anyhow!(
                                     "Responses API error [{code}]: {msg}"
                                 ));
@@ -621,6 +614,52 @@ fn codex_responses_reasoning_effort(raw: &str) -> Option<&'static str> {
     }
 }
 
+fn responses_event_error_details(event: &Value) -> (String, String) {
+    let event_type = string_at(event, "/type").unwrap_or("error");
+    let code = first_string_at(
+        event,
+        &[
+            "/code",
+            "/error/code",
+            "/response/error/code",
+            "/response/incomplete_details/reason",
+            "/response/status",
+        ],
+    )
+    .unwrap_or("unknown");
+    let message = first_string_at(
+        event,
+        &[
+            "/message",
+            "/error/message",
+            "/response/error/message",
+            "/response/incomplete_details/reason",
+        ],
+    )
+    .map_or_else(
+        || format!("{event_type} event received"),
+        |message| {
+            if message == code && event_type == "response.incomplete" {
+                format!("response incomplete: {message}")
+            } else {
+                message.to_string()
+            }
+        },
+    );
+    (code.to_string(), message)
+}
+
+fn first_string_at<'a>(value: &'a Value, paths: &[&str]) -> Option<&'a str> {
+    paths.iter().find_map(|path| string_at(value, path))
+}
+
+fn string_at<'a>(value: &'a Value, path: &str) -> Option<&'a str> {
+    value.pointer(path).and_then(Value::as_str).and_then(|s| {
+        let trimmed = s.trim();
+        (!trimmed.is_empty()).then_some(trimmed)
+    })
+}
+
 /// Parse a composite tool_use_id back to (call_id, item_id).
 /// Composite format: "call_id|item_id"
 fn parse_tool_use_id(id: &str) -> (String, String) {
@@ -710,6 +749,45 @@ mod tests {
         );
         assert!(body.get("thinking").is_none());
         assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn responses_failed_event_reports_nested_error() {
+        let event = json!({
+            "type": "response.failed",
+            "response": {
+                "id": "resp_123",
+                "error": {
+                    "code": "rate_limit_exceeded",
+                    "message": "Please retry later"
+                }
+            }
+        });
+
+        let (code, message) = responses_event_error_details(&event);
+
+        assert_eq!(code, "rate_limit_exceeded");
+        assert_eq!(message, "Please retry later");
+    }
+
+    #[test]
+    fn responses_incomplete_event_reports_reason() {
+        let event = json!({
+            "type": "response.incomplete",
+            "response": {
+                "id": "resp_123",
+                "status": "incomplete",
+                "error": null,
+                "incomplete_details": {
+                    "reason": "content_filter"
+                }
+            }
+        });
+
+        let (code, message) = responses_event_error_details(&event);
+
+        assert_eq!(code, "content_filter");
+        assert_eq!(message, "response incomplete: content_filter");
     }
 
     #[test]

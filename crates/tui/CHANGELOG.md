@@ -134,6 +134,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Interrupted sub-agent lifecycle (#3080).** API-timeout interruptions now
   emit `MailboxMessage::Interrupted`, render terminal interrupted cards, and
   reconcile stale running fanout counts from manager snapshots.
+- **OpenAI Codex stream diagnostics and active tool collapse (#3146).** The
+  Responses bridge now reports nested `response.failed` /
+  `response.incomplete` errors instead of `unknown`, and dense successful
+  in-flight tool bursts collapse into the same calm activity metadata row as
+  committed history.
 - **OpenAI Codex reasoning tiers.** Switching from DeepSeek to `openai-codex`
   now normalizes stale reasoning state into Responses-compatible
   `low`/`medium`/`high`/`xhigh` tiers. Startup, `/config`, and the model

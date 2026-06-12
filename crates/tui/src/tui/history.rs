@@ -829,17 +829,34 @@ impl ToolRunActivitySummary {
 
 /// Detect contiguous runs of successful, low-risk tool cells.
 ///
-/// Failed, running, shell, patch, review, diff, and plan-update cells split
-/// runs so important state never disappears into a summary row.
+/// Failed, running, patch, review, diff, and plan-update cells split runs so
+/// important state never disappears into a summary row. Successful command
+/// cells can join dense runs; Alt+V / expansion keeps their raw details
+/// available without making routine verifier/shell work dominate the default
+/// transcript.
 pub fn detect_tool_runs(history: &[HistoryCell], min_size: usize) -> Vec<ToolRun> {
+    detect_tool_runs_from_slices(history, &[], min_size)
+}
+
+/// Detect contiguous runs across committed history plus the active in-flight
+/// tail. `ToolRun::start` is always the virtual transcript index:
+/// `history.len() + active_offset` for active entries.
+pub fn detect_tool_runs_from_slices(
+    history: &[HistoryCell],
+    active_entries: &[HistoryCell],
+    min_size: usize,
+) -> Vec<ToolRun> {
     if min_size == 0 {
         return Vec::new();
     }
 
     let mut runs = Vec::new();
     let mut index = 0;
-    while index < history.len() {
-        if !is_collapsible_tool_cell(&history[index]) {
+    let total_len = history.len().saturating_add(active_entries.len());
+    while index < total_len {
+        if !cell_at_virtual_index(history, active_entries, index)
+            .is_some_and(is_collapsible_tool_cell)
+        {
             index += 1;
             continue;
         }
@@ -847,8 +864,13 @@ pub fn detect_tool_runs(history: &[HistoryCell], min_size: usize) -> Vec<ToolRun
         let start = index;
         let mut names: Vec<String> = Vec::new();
         let mut activity = ToolRunActivitySummary::default();
-        while index < history.len() && is_collapsible_tool_cell(&history[index]) {
-            if let HistoryCell::Tool(tool) = &history[index] {
+        while index < total_len
+            && cell_at_virtual_index(history, active_entries, index)
+                .is_some_and(is_collapsible_tool_cell)
+        {
+            if let Some(HistoryCell::Tool(tool)) =
+                cell_at_virtual_index(history, active_entries, index)
+            {
                 let name = tool_display_name(tool);
                 if !names.iter().any(|existing| existing == name) {
                     names.push(name.to_string());
@@ -873,12 +895,26 @@ pub fn detect_tool_runs(history: &[HistoryCell], min_size: usize) -> Vec<ToolRun
     runs
 }
 
+fn cell_at_virtual_index<'a>(
+    history: &'a [HistoryCell],
+    active_entries: &'a [HistoryCell],
+    index: usize,
+) -> Option<&'a HistoryCell> {
+    history
+        .get(index)
+        .or_else(|| active_entries.get(index.checked_sub(history.len())?))
+}
+
 fn is_collapsible_tool_cell(cell: &HistoryCell) -> bool {
     matches!(cell, HistoryCell::Tool(tool) if tool.is_success() && !tool.is_collapsible_guard())
 }
 
 fn generic_tool_name_is_collapse_guard(name: &str) -> bool {
     let normalized = name.trim().to_ascii_lowercase();
+    if is_metadata_tool_name(&normalized) {
+        return false;
+    }
+
     normalized.contains("patch")
         || normalized.contains("write")
         || normalized.contains("edit")
@@ -886,9 +922,21 @@ fn generic_tool_name_is_collapse_guard(name: &str) -> bool {
         || normalized.contains("remove")
         || normalized.contains("commit")
         || normalized.contains("push")
-        || normalized.contains("shell")
-        || normalized.contains("exec")
         || normalized.contains("review")
+}
+
+fn is_metadata_tool_name(name: &str) -> bool {
+    matches!(
+        name,
+        "update_plan"
+            | "todo_write"
+            | "todo_add"
+            | "todo_update"
+            | "checklist_write"
+            | "checklist_add"
+            | "checklist_update"
+            | "checklist_list"
+    )
 }
 
 fn tool_display_name(tool: &ToolCell) -> &str {
@@ -930,8 +978,7 @@ fn classify_tool_name_activity(name: &str) -> ToolRunActivity {
         "edit_file" | "apply_patch" | "write_file" | "diff" => ToolRunActivity::Edit,
         "agent_open" | "agent_eval" | "agent_close" | "agent_spawn" | "tool_agent" | "rlm_open"
         | "rlm_eval" | "rlm_configure" | "rlm_close" | "rlm" => ToolRunActivity::Delegate,
-        "update_plan" | "todo_write" | "todo_add" | "todo_update" | "checklist_write"
-        | "checklist_add" | "checklist_update" => ToolRunActivity::Metadata,
+        _ if is_metadata_tool_name(&normalized) => ToolRunActivity::Metadata,
         _ if normalized.contains("search")
             || normalized.contains("grep")
             || normalized.contains("find") =>

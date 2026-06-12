@@ -131,7 +131,11 @@ impl ChatWidget {
 
         let history_len = app.history.len();
         let tool_runs = if app.tool_collapse_active() {
-            crate::tui::history::detect_tool_runs(&app.history, app.tool_collapse_threshold)
+            crate::tui::history::detect_tool_runs_from_slices(
+                &app.history,
+                active_entries,
+                app.tool_collapse_threshold,
+            )
         } else {
             Vec::new()
         };
@@ -201,7 +205,12 @@ impl ChatWidget {
                     .find(|run| run.start == idx && collapsed_run_starts.contains(&idx))
                 {
                     filtered_cells.push(tool_run_summary_cell(run));
-                    filtered_revs.push(tool_run_summary_revision(run, &app.history_revisions));
+                    filtered_revs.push(tool_run_summary_revision(
+                        run,
+                        &app.history_revisions,
+                        history_len,
+                        app.active_cell_revision,
+                    ));
                     filtered_to_original.push(idx);
                     continue;
                 }
@@ -217,13 +226,25 @@ impl ChatWidget {
                     if app.collapsed_cells.contains(&original_idx) {
                         continue;
                     }
+                    if collapsed_tool_indices.contains(&original_idx) {
+                        continue;
+                    }
+                    if let Some(run) = tool_runs.iter().find(|run| {
+                        run.start == original_idx && collapsed_run_starts.contains(&original_idx)
+                    }) {
+                        filtered_cells.push(tool_run_summary_cell(run));
+                        filtered_revs.push(tool_run_summary_revision(
+                            run,
+                            &app.history_revisions,
+                            history_len,
+                            active_rev,
+                        ));
+                        filtered_to_original.push(original_idx);
+                        continue;
+                    }
                     filtered_cells.push(cell.clone());
                     let salt = (i as u64).wrapping_add(1);
-                    filtered_revs.push(
-                        active_rev
-                            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-                            .wrapping_add(salt),
-                    );
+                    filtered_revs.push(active_entry_revision(active_rev, salt));
                     filtered_to_original.push(original_idx);
                 }
             }
@@ -379,12 +400,27 @@ fn tool_run_summary_cell(run: &ToolRun) -> HistoryCell {
     }))
 }
 
-fn tool_run_summary_revision(run: &ToolRun, revisions: &[u64]) -> u64 {
+fn tool_run_summary_revision(
+    run: &ToolRun,
+    revisions: &[u64],
+    history_len: usize,
+    active_rev: u64,
+) -> u64 {
     let mut revision = 0xA11C_EA5E_D00D_2692u64 ^ ((run.start as u64) << 32) ^ (run.count as u64);
     for idx in run.start..run.start.saturating_add(run.count) {
-        revision = revision.rotate_left(7) ^ revisions.get(idx).copied().unwrap_or(u64::MAX);
+        let cell_revision = revisions.get(idx).copied().unwrap_or_else(|| {
+            let active_idx = idx.saturating_sub(history_len);
+            active_entry_revision(active_rev, (active_idx as u64).wrapping_add(1))
+        });
+        revision = revision.rotate_left(7) ^ cell_revision;
     }
     revision
+}
+
+fn active_entry_revision(active_rev: u64, salt: u64) -> u64 {
+    active_rev
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .wrapping_add(salt)
 }
 
 impl Renderable for ChatWidget {
@@ -2083,7 +2119,15 @@ fn composer_top_right_chrome(app: &App, area_width: u16) -> Option<Line<'static>
 }
 
 fn should_render_empty_state(app: &App) -> bool {
-    app.history.is_empty() && !app.is_loading && !app.is_compacting && !app.is_purging
+    let active_is_empty = app
+        .active_cell
+        .as_ref()
+        .map_or(true, crate::tui::active_cell::ActiveCell::is_empty);
+    app.history.is_empty()
+        && active_is_empty
+        && !app.is_loading
+        && !app.is_compacting
+        && !app.is_purging
 }
 
 fn build_empty_state_lines(app: &App, area: Rect) -> Vec<Line<'static>> {
@@ -2740,6 +2784,7 @@ mod tests {
     use crate::config::{ApiProvider, Config};
     use crate::localization::Locale;
     use crate::palette;
+    use crate::tui::active_cell::ActiveCell;
     use crate::tui::app::{App, ComposerDensity, ToolCollapseMode, TuiOptions};
     use crate::tui::history::{GenericToolCell, HistoryCell, ToolCell, ToolStatus};
     use crate::tui::scrolling::{TranscriptLineMeta, TranscriptScroll};
@@ -2852,6 +2897,40 @@ mod tests {
         app.tool_collapse_mode = ToolCollapseMode::Compact;
         app.tool_collapse_threshold = 3;
         add_dense_tool_run(&mut app);
+
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 8,
+        };
+        let mut buf = Buffer::empty(area);
+        let widget = ChatWidget::new(&mut app, area);
+        widget.render(area, &mut buf);
+        let rendered = buffer_text(&buf, area);
+
+        assert_eq!(app.collapsed_cell_map, vec![0]);
+        assert!(
+            rendered.contains("Explored 2 files, 1 search"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("activity_group"), "{rendered}");
+        assert!(
+            !rendered.contains("full output from list_dir"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn chat_widget_collapses_dense_active_tool_runs_by_default() {
+        let mut app = create_test_app();
+        app.tool_collapse_mode = ToolCollapseMode::Compact;
+        app.tool_collapse_threshold = 3;
+        let active = app.active_cell.get_or_insert_with(ActiveCell::new);
+        active.push_untracked(success_tool_cell("read_file"));
+        active.push_untracked(success_tool_cell("list_dir"));
+        active.push_untracked(success_tool_cell("web_search"));
+        app.bump_active_cell_revision();
 
         let area = Rect {
             x: 0,
