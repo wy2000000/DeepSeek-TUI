@@ -71,6 +71,8 @@ folds in several community contributions.
   (#2982); CJK word-wrap (#963); clickable sidebar stop targets (#3028); live token throughput
   (#3190); auto-expiring terminal sub-agent cards (#3078).
 - Linux glibc preflight in the installer/update path with a clear error. (#3207, #1067)
+- Self-update retries transient GitHub metadata/asset failures and falls back from the GitHub
+  REST API to the public `releases/latest` redirect before constructing release asset URLs. (#3232)
 - Provider picker lists providers in neutral alphabetical order instead of hard-coding DeepSeek first; the active provider stays pre-selected. (#3076)
 
 ### Community contributions

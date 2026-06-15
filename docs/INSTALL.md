@@ -603,9 +603,10 @@ cargo install codewhale-cli --locked
 
 ### npm download is slow or times out from mainland China
 
-Set `DEEPSEEK_TUI_RELEASE_BASE_URL` to a mirrored release-asset directory
+Set `CODEWHALE_RELEASE_BASE_URL` to a mirrored release-asset directory
 (rsproxy, TUNA, Tencent COS, Aliyun OSS), or skip npm entirely and use the
 Cargo mirror setup in [Section 4](#4-install-via-cargo-any-tier-1-rust-target).
+The legacy `DEEPSEEK_TUI_RELEASE_BASE_URL` name is still accepted.
 
 ### `codewhale update` is blocked by GitHub from mainland China
 
@@ -624,13 +625,14 @@ cargo install --git https://cnb.cool/codewhale.net/codewhale --tag vX.Y.Z codewh
 If you operate a binary asset mirror, `codewhale update` can use it directly:
 
 ```bash
+CODEWHALE_RELEASE_BASE_URL=https://your-mirror.example.com/CodeWhale/vX.Y.Z/ \
 DEEPSEEK_TUI_VERSION=X.Y.Z \
-DEEPSEEK_TUI_RELEASE_BASE_URL=https://your-mirror.example.com/CodeWhale/vX.Y.Z/ \
 codewhale update
 ```
 
 The mirror directory must contain `codewhale-artifacts-sha256.txt` and the
-platform binaries from the GitHub release.
+platform binaries from the GitHub release. The legacy
+`DEEPSEEK_TUI_RELEASE_BASE_URL` mirror variable remains supported as an alias.
 
 ### Debian/Ubuntu: `feature edition2024 is required` from `cargo install`
 

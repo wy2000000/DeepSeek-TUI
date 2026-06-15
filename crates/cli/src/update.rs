@@ -9,7 +9,7 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use codewhale_release::{
     CHECKSUM_MANIFEST_ASSET, ReleaseChannel, ReleaseQuery, UPDATE_USER_AGENT,
     compare_release_versions, is_beta_tag, mirror_asset_url, resolve_release_query,
@@ -18,6 +18,12 @@ use codewhale_release::{
 use reqwest::Proxy;
 use std::io::Write;
 use std::time::Duration;
+
+const GITHUB_LATEST_RELEASE_PAGE_URL: &str = "https://github.com/Hmbown/CodeWhale/releases/latest";
+const GITHUB_RELEASE_DOWNLOAD_BASE_URL: &str =
+    "https://github.com/Hmbown/CodeWhale/releases/download";
+const UPDATE_HTTP_ATTEMPTS: usize = 3;
+const UPDATE_HTTP_RETRY_DELAY_MS: u64 = 100;
 
 /// Run the self-update workflow.
 pub fn run_update(beta: bool, check_only: bool, proxy_arg: Option<String>) -> Result<()> {
@@ -477,10 +483,23 @@ fn fetch_latest_release(channel: ReleaseChannel, proxy: Option<&Proxy>) -> Resul
             ),
             source: UpdateReleaseSource::Mirror { base_url },
         }),
-        ReleaseQuery::GitHubLatest { url } => Ok(FetchedRelease {
-            release: fetch_latest_release_from_url(url, proxy)?,
-            source: UpdateReleaseSource::GitHub,
-        }),
+        ReleaseQuery::GitHubLatest { url } => match fetch_latest_release_from_url(url, proxy) {
+            Ok(release) => Ok(FetchedRelease {
+                release,
+                source: UpdateReleaseSource::GitHub,
+            }),
+            Err(api_error) => {
+                eprintln!(
+                    "GitHub API release lookup failed; trying github.com releases/latest fallback..."
+                );
+                Ok(FetchedRelease {
+                    release: fetch_latest_stable_release_from_redirect(proxy).with_context(
+                        || format!("GitHub API release lookup failed first: {api_error:#}"),
+                    )?,
+                    source: UpdateReleaseSource::GitHub,
+                })
+            }
+        },
         ReleaseQuery::GitHubReleaseList { url } => Ok(FetchedRelease {
             release: fetch_latest_beta_release_from_url(url, proxy)?,
             source: UpdateReleaseSource::GitHub,
@@ -495,6 +514,21 @@ fn release_from_mirror_base_url(
     rust_arch: &str,
 ) -> Release {
     let tag_name = format!("v{}", version.trim_start_matches('v'));
+    release_from_asset_base_url(&tag_name, base_url, os, rust_arch)
+}
+
+fn release_from_github_download_tag(tag_name: &str, os: &str, rust_arch: &str) -> Release {
+    let tag_name = format!("v{}", tag_name.trim_start_matches('v'));
+    let base_url = format!("{GITHUB_RELEASE_DOWNLOAD_BASE_URL}/{tag_name}");
+    release_from_asset_base_url(&tag_name, &base_url, os, rust_arch)
+}
+
+fn release_from_asset_base_url(
+    tag_name: &str,
+    base_url: &str,
+    os: &str,
+    rust_arch: &str,
+) -> Release {
     let mut assets = vec![Asset {
         name: CHECKSUM_MANIFEST_ASSET.to_string(),
         browser_download_url: mirror_asset_url(base_url, CHECKSUM_MANIFEST_ASSET),
@@ -509,13 +543,17 @@ fn release_from_mirror_base_url(
     }
 
     Release {
-        tag_name,
+        tag_name: tag_name.to_string(),
         prerelease: false,
         assets,
     }
 }
 
-fn fetch_release_json(url: &str, description: &str, proxy: Option<&Proxy>) -> Result<String> {
+fn fetch_release_json_once(
+    url: &str,
+    description: &str,
+    proxy: Option<&Proxy>,
+) -> Result<(reqwest::StatusCode, String)> {
     let client = update_http_client(proxy)?;
     let response = client
         .get(url)
@@ -526,10 +564,44 @@ fn fetch_release_json(url: &str, description: &str, proxy: Option<&Proxy>) -> Re
     let body = response
         .text()
         .with_context(|| format!("failed to read {description} response body from {url}"))?;
-    if !status.is_success() {
-        bail!("failed to fetch {description} from {url}: HTTP {status}\n{body}");
+    Ok((status, body))
+}
+
+fn fetch_release_json(url: &str, description: &str, proxy: Option<&Proxy>) -> Result<String> {
+    let mut last_error = None;
+    for attempt in 1..=UPDATE_HTTP_ATTEMPTS {
+        match fetch_release_json_once(url, description, proxy) {
+            Ok((status, body)) if status.is_success() => return Ok(body),
+            Ok((status, body)) => {
+                let error =
+                    anyhow!("failed to fetch {description} from {url}: HTTP {status}\n{body}");
+                if should_retry_http_status(status) && attempt < UPDATE_HTTP_ATTEMPTS {
+                    last_error = Some(error);
+                    sleep_before_update_retry(attempt);
+                    continue;
+                }
+                return Err(error);
+            }
+            Err(error) if attempt < UPDATE_HTTP_ATTEMPTS => {
+                last_error = Some(error);
+                sleep_before_update_retry(attempt);
+            }
+            Err(error) => return Err(error),
+        }
     }
-    Ok(body)
+    Err(last_error.unwrap_or_else(|| anyhow!("failed to fetch {description} from {url}")))
+}
+
+fn should_retry_http_status(status: reqwest::StatusCode) -> bool {
+    status.is_server_error()
+        || status == reqwest::StatusCode::REQUEST_TIMEOUT
+        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+}
+
+fn sleep_before_update_retry(attempt: usize) {
+    std::thread::sleep(Duration::from_millis(
+        UPDATE_HTTP_RETRY_DELAY_MS * attempt as u64,
+    ));
 }
 
 fn fetch_latest_release_from_url(url: &str, proxy: Option<&Proxy>) -> Result<Release> {
@@ -539,6 +611,92 @@ fn fetch_latest_release_from_url(url: &str, proxy: Option<&Proxy>) -> Result<Rel
     })?;
 
     Ok(release)
+}
+
+fn fetch_latest_stable_release_from_redirect(proxy: Option<&Proxy>) -> Result<Release> {
+    let tag_name =
+        fetch_latest_stable_tag_from_redirect_url(GITHUB_LATEST_RELEASE_PAGE_URL, proxy)?;
+    Ok(release_from_github_download_tag(
+        &tag_name,
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+    ))
+}
+
+fn fetch_latest_stable_tag_from_redirect_url(url: &str, proxy: Option<&Proxy>) -> Result<String> {
+    let client = update_http_client(proxy)?;
+    let mut last_error = None;
+    for attempt in 1..=UPDATE_HTTP_ATTEMPTS {
+        match fetch_latest_stable_tag_from_redirect_url_once(&client, url) {
+            Ok(tag_name) => return Ok(tag_name),
+            Err(error) if attempt < UPDATE_HTTP_ATTEMPTS => {
+                last_error = Some(error);
+                sleep_before_update_retry(attempt);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow!("failed to resolve latest stable release from {url}")))
+}
+
+fn fetch_latest_stable_tag_from_redirect_url_once(
+    client: &reqwest::blocking::Client,
+    url: &str,
+) -> Result<String> {
+    let response = client
+        .get(url)
+        .send()
+        .with_context(|| format!("failed to fetch release redirect from {url}"))?;
+    let status = response.status();
+    let final_url = response.url().clone();
+    if status.is_success() {
+        if let Some(tag_name) = release_tag_from_github_release_url(&final_url) {
+            return Ok(tag_name);
+        }
+        let body = response
+            .text()
+            .with_context(|| format!("failed to read release redirect response from {url}"))?;
+        if let Some(tag_name) = release_tag_from_github_release_html(&body) {
+            return Ok(tag_name);
+        }
+        bail!("release redirect did not resolve to a tag URL: {final_url}");
+    }
+
+    let body = response
+        .text()
+        .with_context(|| format!("failed to read release redirect response from {url}"))?;
+    bail!("failed to fetch release redirect from {url}: HTTP {status}\n{body}");
+}
+
+fn release_tag_from_github_release_url(url: &reqwest::Url) -> Option<String> {
+    let segments = url.path_segments()?.collect::<Vec<_>>();
+    segments
+        .windows(3)
+        .find(|window| window[0] == "releases" && window[1] == "tag")
+        .map(|window| window[2].to_string())
+        .filter(|tag| !tag.is_empty())
+}
+
+fn release_tag_from_github_release_html(body: &str) -> Option<String> {
+    const MARKERS: &[&str] = &[
+        "/Hmbown/CodeWhale/releases/tag/",
+        "/hmbown/CodeWhale/releases/tag/",
+        "/releases/tag/",
+    ];
+    for marker in MARKERS {
+        let Some((_, rest)) = body.split_once(marker) else {
+            continue;
+        };
+        let tag = rest
+            .split(|ch: char| matches!(ch, '"' | '\'' | '<' | '>' | '?' | '#' | '&'))
+            .next()
+            .unwrap_or("")
+            .trim();
+        if !tag.is_empty() {
+            return Some(tag.to_string());
+        }
+    }
+    None
 }
 
 fn fetch_latest_beta_release_from_url(url: &str, proxy: Option<&Proxy>) -> Result<Release> {
@@ -557,6 +715,31 @@ fn fetch_latest_beta_release_from_url(url: &str, proxy: Option<&Proxy>) -> Resul
 
 /// Download a URL to bytes.
 fn download_url(url: &str, proxy: Option<&Proxy>) -> Result<Vec<u8>> {
+    let mut last_error = None;
+    for attempt in 1..=UPDATE_HTTP_ATTEMPTS {
+        match download_url_once(url, proxy) {
+            Ok((status, bytes)) if status.is_success() => return Ok(bytes),
+            Ok((status, bytes)) => {
+                let body = String::from_utf8_lossy(&bytes);
+                let error = anyhow!("download failed with HTTP {status}: {body}");
+                if should_retry_http_status(status) && attempt < UPDATE_HTTP_ATTEMPTS {
+                    last_error = Some(error);
+                    sleep_before_update_retry(attempt);
+                    continue;
+                }
+                return Err(error);
+            }
+            Err(error) if attempt < UPDATE_HTTP_ATTEMPTS => {
+                last_error = Some(error);
+                sleep_before_update_retry(attempt);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow!("failed to download {url}")))
+}
+
+fn download_url_once(url: &str, proxy: Option<&Proxy>) -> Result<(reqwest::StatusCode, Vec<u8>)> {
     let client = update_http_client(proxy)?;
     let response = client
         .get(url)
@@ -567,12 +750,7 @@ fn download_url(url: &str, proxy: Option<&Proxy>) -> Result<Vec<u8>> {
         .bytes()
         .with_context(|| format!("failed to read response body from {url}"))?;
 
-    if !status.is_success() {
-        let body = String::from_utf8_lossy(&bytes);
-        bail!("download failed with HTTP {status}: {body}");
-    }
-
-    Ok(bytes.to_vec())
+    Ok((status, bytes.to_vec()))
 }
 
 /// Compute the SHA256 hex digest of data.
@@ -1313,6 +1491,56 @@ E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855  *codewhale-win
     }
 
     #[test]
+    fn github_release_url_parser_extracts_tag() {
+        let url = reqwest::Url::parse("https://github.com/Hmbown/CodeWhale/releases/tag/v0.8.61")
+            .unwrap();
+
+        assert_eq!(
+            release_tag_from_github_release_url(&url).as_deref(),
+            Some("v0.8.61")
+        );
+    }
+
+    #[test]
+    fn github_release_download_fallback_uses_deterministic_asset_urls() {
+        let release = release_from_github_download_tag("0.8.61", "macos", "aarch64");
+
+        assert_eq!(release.tag_name, "v0.8.61");
+        assert_eq!(
+            release.assets[0].browser_download_url,
+            "https://github.com/Hmbown/CodeWhale/releases/download/v0.8.61/codewhale-artifacts-sha256.txt"
+        );
+        let dispatcher =
+            select_platform_asset(&release, "codewhale-macos-arm64").expect("dispatcher asset");
+        assert_eq!(
+            dispatcher.browser_download_url,
+            "https://github.com/Hmbown/CodeWhale/releases/download/v0.8.61/codewhale-macos-arm64"
+        );
+        let tui = select_platform_asset(&release, "codewhale-tui-macos-arm64").expect("tui asset");
+        assert_eq!(
+            tui.browser_download_url,
+            "https://github.com/Hmbown/CodeWhale/releases/download/v0.8.61/codewhale-tui-macos-arm64"
+        );
+    }
+
+    #[test]
+    fn latest_stable_redirect_fallback_reads_tag_url() {
+        let (url, request_rx, handle) = serve_http_once("200 OK", "text/html", b"<html></html>");
+        let tag_url = url.replace("/release", "/Hmbown/CodeWhale/releases/tag/v9.9.9");
+
+        let tag = fetch_latest_stable_tag_from_redirect_url(&tag_url, None)
+            .expect("tag should parse from final URL");
+
+        assert_eq!(tag, "v9.9.9");
+        let request = request_rx.recv().expect("captured request");
+        assert!(
+            request.starts_with("GET /Hmbown/CodeWhale/releases/tag/v9.9.9 "),
+            "got {request:?}"
+        );
+        handle.join().expect("test server thread");
+    }
+
+    #[test]
     fn cnb_release_base_url_includes_tag_directory() {
         assert_eq!(
             codewhale_release::cnb_release_base_url("0.8.47"),
@@ -1397,33 +1625,41 @@ E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855  *codewhale-win
         assert!(hint.contains("codewhale-tui --locked"), "{hint}");
     }
 
-    fn serve_http_once(
-        status: &'static str,
-        content_type: &'static str,
-        body: &'static [u8],
+    fn serve_http_responses(
+        responses: Vec<(&'static str, &'static str, &'static [u8])>,
     ) -> (String, mpsc::Receiver<String>, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
         let addr = listener.local_addr().expect("test server addr");
         let (request_tx, request_rx) = mpsc::channel();
 
         let handle = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept test request");
-            let mut buf = [0_u8; 4096];
-            let n = stream.read(&mut buf).expect("read test request");
-            request_tx
-                .send(String::from_utf8_lossy(&buf[..n]).to_string())
-                .expect("send captured request");
+            for (status, content_type, body) in responses {
+                let (mut stream, _) = listener.accept().expect("accept test request");
+                let mut buf = [0_u8; 4096];
+                let n = stream.read(&mut buf).expect("read test request");
+                request_tx
+                    .send(String::from_utf8_lossy(&buf[..n]).to_string())
+                    .expect("send captured request");
 
-            write!(
-                stream,
-                "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
-            )
-            .expect("write test response headers");
-            stream.write_all(body).expect("write test response body");
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .expect("write test response headers");
+                stream.write_all(body).expect("write test response body");
+            }
         });
 
         (format!("http://{addr}/release"), request_rx, handle)
+    }
+
+    fn serve_http_once(
+        status: &'static str,
+        content_type: &'static str,
+        body: &'static [u8],
+    ) -> (String, mpsc::Receiver<String>, thread::JoinHandle<()>) {
+        serve_http_responses(vec![(status, content_type, body)])
     }
 
     #[test]
@@ -1469,9 +1705,35 @@ E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855  *codewhale-win
     }
 
     #[test]
+    fn fetch_latest_release_from_url_retries_transient_gateway_error() {
+        let body = br#"{
+          "tag_name": "v9.9.9",
+          "assets": [
+            { "name": "codewhale-linux-x64", "browser_download_url": "http://example.invalid/codewhale-linux-x64" }
+          ]
+        }"#;
+        let (url, request_rx, handle) = serve_http_responses(vec![
+            ("504 Gateway Timeout", "text/plain", b"gateway timeout"),
+            ("200 OK", "application/json", body),
+        ]);
+        let release = fetch_latest_release_from_url(&url, None)
+            .expect("release JSON should parse after retry");
+
+        assert_eq!(release.tag_name, "v9.9.9");
+        let first = request_rx.recv().expect("first request");
+        let second = request_rx.recv().expect("second request");
+        assert!(first.starts_with("GET /release "), "got {first:?}");
+        assert!(second.starts_with("GET /release "), "got {second:?}");
+        handle.join().expect("test server thread");
+    }
+
+    #[test]
     fn fetch_latest_release_from_url_reports_http_errors() {
-        let (url, _request_rx, handle) =
-            serve_http_once("500 Internal Server Error", "text/plain", b"server broke");
+        let (url, _request_rx, handle) = serve_http_responses(vec![
+            ("500 Internal Server Error", "text/plain", b"server broke"),
+            ("500 Internal Server Error", "text/plain", b"server broke"),
+            ("500 Internal Server Error", "text/plain", b"server broke"),
+        ]);
         let err = fetch_latest_release_from_url(&url, None).expect_err("HTTP 500 should fail");
 
         assert!(
@@ -1521,6 +1783,22 @@ E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855  *codewhale-win
             err.to_string().contains("no beta release found"),
             "unexpected error: {err:#}"
         );
+        handle.join().expect("test server thread");
+    }
+
+    #[test]
+    fn download_url_retries_transient_gateway_error() {
+        let (url, request_rx, handle) = serve_http_responses(vec![
+            ("503 Service Unavailable", "text/plain", b"try again"),
+            ("200 OK", "application/octet-stream", b"\0binary bytes"),
+        ]);
+        let bytes = download_url(&url, None).expect("binary download should retry and succeed");
+
+        assert_eq!(bytes, b"\0binary bytes");
+        let first = request_rx.recv().expect("first request");
+        let second = request_rx.recv().expect("second request");
+        assert!(first.starts_with("GET /release "), "got {first:?}");
+        assert!(second.starts_with("GET /release "), "got {second:?}");
         handle.join().expect("test server thread");
     }
 
