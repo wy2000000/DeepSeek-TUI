@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Retroactive credits
+
+A credit-reconciliation pass found shipped community fixes that were never
+recorded in this changelog. Crediting them now, with the version they shipped in:
+
+- Global `~/.deepseek/AGENTS.md` fallback loading — thanks @manaskarra (fix) and @xfy6238 (report) (#1157, v0.8.27)
+- CRLF SSE event parsing for MCP — thanks @reidliu41 (fix) and @djairjr (report) (#1309, v0.8.29)
+- Reduce-motion default on VTE/flicker terminals — thanks @Geallier (report) (#1470, v0.8.34)
+- `portable-pty` 0.9 upgrade for LoongArch64 — thanks @quentin-lian (fix) and @k0tran (report) (#1531, #1992, v0.8.46)
+- `DEEPSEEK_ALLOW_INSECURE_HTTP` guard for LAN vLLM — thanks @F1LT3R (report) (#1656, v0.8.47)
+- Hidden `reasoning_content` kept in English regardless of locale — thanks @cmyyy (report) (#1842, v0.8.47)
+- `ExternalTool` abstraction layer — thanks @aboimpinto (#1794, #2294, v0.8.48)
+- Ephemeral generated project context — thanks @Final527 (report) (#3058, v0.8.59)
+
 ## [0.8.61] - 2026-06-14
 
 This release lands the **runtime control plane** for multi-agent work: the TUI stays
@@ -67,6 +81,11 @@ folds in several community contributions.
 - Whale-accent rename — thanks @nightt5879 (#3197)
 - `DEEPSEEK_BASE_URL` / `MODEL` honored in `exec` — thanks @hongchen1993 (#3221)
 - VS Code read-only API documentation — thanks @cyq1017 (#3013)
+- Atomic ask-only permission rule persistence — thanks @greyfreedom (#3233)
+- DeepInfra provider support — thanks @idling11 (#3235, closes #3231)
+- WeChat bridge (`integrations/weixin-bridge` via Feishu + Tencent OpenClaw) — thanks @VincentCorleone (#3206)
+- Config robustness: atomic permission-rule save, one-time config `.bak` backup before the first changed write, `CODEWHALE_HOME` as primary config home, and accepting the dispatcher-written config shape (camelCase aliases + `[features.enabled]` table) so legacy/dual-written configs parse cleanly
+- Dependency/CI bumps: docker login/qemu actions, softprops gh-release, download-artifact, vitest, @opennextjs/cloudflare
 
 ## [0.8.60] - 2026-06-13
 
