@@ -976,8 +976,9 @@ fn classify_tool_name_activity(name: &str) -> ToolRunActivity {
         | "task_gate_run"
         | "validate_data" => ToolRunActivity::Command,
         "edit_file" | "apply_patch" | "write_file" | "diff" => ToolRunActivity::Edit,
-        "agent_open" | "agent_eval" | "agent_close" | "agent_spawn" | "tool_agent" | "rlm_open"
-        | "rlm_eval" | "rlm_configure" | "rlm_close" | "rlm" => ToolRunActivity::Delegate,
+        "agent" | "rlm_open" | "rlm_eval" | "rlm_configure" | "rlm_close" | "rlm" => {
+            ToolRunActivity::Delegate
+        }
         _ if is_metadata_tool_name(&normalized) => ToolRunActivity::Metadata,
         _ if normalized.contains("search")
             || normalized.contains("grep")
@@ -1772,21 +1773,19 @@ impl GenericToolCell {
             return lines;
         }
 
-        // Issue #409: sub-agent open already gets a dedicated `DelegateCard`
+        // Sub-agent launch already gets a dedicated `DelegateCard`
         // that owns the live action tree, status, and final summary. The
         // generic tool block for the same call duplicates that signal at
         // 3-4 lines per spawn — N parallel spawns multiply the noise. In
         // live mode, render one compact summary line and let the
         // DelegateCard be the source of truth. Transcript mode keeps the
         // full block so session replay remains complete.
-        if matches!(mode, RenderMode::Live)
-            && matches!(self.name.as_str(), "agent_open" | "agent_spawn")
-        {
-            return self.render_agent_spawn_compact(low_motion);
+        if matches!(mode, RenderMode::Live) && self.name == "agent" {
+            return self.render_agent_compact(low_motion);
         }
 
         let mut lines = Vec::new();
-        // Map the actual tool name (e.g. `agent_open`, `apply_patch`) to a
+        // Map the actual tool name (e.g. `agent`, `apply_patch`) to a
         // family rather than the catch-all `"Tool"` title — this is what
         // gives a `GenericToolCell` the right verb glyph (◐ delegate, ⋮⋮
         // fanout, etc.) instead of falling back to the neutral bullet.
@@ -1872,16 +1871,16 @@ impl GenericToolCell {
         wrap_card_rail(lines)
     }
 
-    /// Render `agent_open`/legacy `agent_spawn` as a single compact summary line for live
-    /// mode (#409). The companion `DelegateCard` already carries the
+    /// Render `agent` as a single compact summary line for live mode. The
+    /// companion `DelegateCard` already carries the
     /// live action tree, status, and final summary; this line is just
     /// the pointer that says "a spawn happened, here's the agent id".
     ///
     /// Output shape (header):
-    ///   `◐ delegate · agent_open  agent-abc12  [running]`
+    ///   `◐ delegate · agent  agent-abc12  [running]`
     /// Falls back to a placeholder when the spawn is still pending and
     /// no agent id has been assigned yet.
-    fn render_agent_spawn_compact(&self, low_motion: bool) -> Vec<Line<'static>> {
+    fn render_agent_compact(&self, low_motion: bool) -> Vec<Line<'static>> {
         let family = crate::tui::widgets::tool_card::ToolFamily::Delegate;
         let agent_id = self
             .output
@@ -4068,7 +4067,7 @@ mod tests {
         assert!(!joined.contains("activity_group"));
     }
 
-    // ---- #409 compact agent_spawn rendering ----
+    // ---- Compact agent rendering ----
     //
     // The DelegateCard owns live state for spawned sub-agents; the
     // generic tool block previously duplicated that signal at 3-4 lines
@@ -4107,9 +4106,9 @@ mod tests {
     }
 
     #[test]
-    fn agent_spawn_renders_single_compact_line_in_live_mode() {
+    fn agent_renders_single_compact_line_in_live_mode() {
         let cell = GenericToolCell {
-            name: "agent_spawn".to_string(),
+            name: "agent".to_string(),
             status: ToolStatus::Running,
             input_summary: Some("prompt: do thing".to_string()),
             output: Some(
@@ -4142,12 +4141,12 @@ mod tests {
     }
 
     #[test]
-    fn agent_spawn_pending_render_uses_placeholder_id() {
+    fn agent_pending_render_uses_placeholder_id() {
         // No output yet → use the … placeholder so the user still sees a
         // header line during the brief gap between tool-call-started and
         // the spawn returning the agent_id.
         let cell = GenericToolCell {
-            name: "agent_spawn".to_string(),
+            name: "agent".to_string(),
             status: ToolStatus::Running,
             input_summary: Some("prompt: do thing".to_string()),
             output: None,
@@ -4163,11 +4162,11 @@ mod tests {
     }
 
     #[test]
-    fn agent_spawn_transcript_mode_keeps_full_block() {
+    fn agent_transcript_mode_keeps_full_block() {
         // Transcript mode is for replay/debug — preserve the full block
         // so session export still carries the args/output verbatim.
         let cell = GenericToolCell {
-            name: "agent_spawn".to_string(),
+            name: "agent".to_string(),
             status: ToolStatus::Success,
             input_summary: Some("prompt: do thing".to_string()),
             output: Some(
@@ -4185,8 +4184,8 @@ mod tests {
     }
 
     #[test]
-    fn other_tools_are_unaffected_by_agent_spawn_compact_path() {
-        // Only `agent_spawn` is collapsed — `read_file` and friends
+    fn other_tools_are_unaffected_by_agent_compact_path() {
+        // Only `agent` is collapsed — `read_file` and friends
         // continue to render their normal multi-line block in live mode.
         let cell = GenericToolCell {
             name: "read_file".to_string(),
@@ -5006,7 +5005,7 @@ mod tests {
     #[test]
     fn generic_tool_cell_picks_family_from_tool_name() {
         let cell = GenericToolCell {
-            name: "agent_spawn".to_string(),
+            name: "agent".to_string(),
             status: ToolStatus::Running,
             input_summary: Some("foo".to_string()),
             output: None,
@@ -5021,7 +5020,7 @@ mod tests {
             .iter()
             .map(|s| s.content.as_ref())
             .collect::<String>();
-        // agent_spawn → Delegate family (◐ delegate).
+        // agent → Delegate family (◐ delegate).
         assert!(
             header_visible.contains('\u{25D0}'),
             "Delegate glyph `◐`: {header_visible:?}"

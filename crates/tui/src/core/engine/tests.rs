@@ -1,6 +1,6 @@
 use super::*;
 
-use super::context::TURN_MAX_OUTPUT_TOKENS;
+use super::context::{COMPACTION_SUMMARY_MARKER, TURN_MAX_OUTPUT_TOKENS};
 use crate::config::ApiProvider;
 use crate::models::SystemBlock;
 use crate::test_support::lock_test_env;
@@ -10,63 +10,11 @@ use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
+use std::path::PathBuf;
 use std::time::Instant;
 use tempfile::tempdir;
 
 const WORKING_SET_SUMMARY_MARKER: &str = "## Repo Working Set";
-static CAPACITY_MEMORY_ENV_LOCK: LazyLock<tokio::sync::Mutex<()>> =
-    LazyLock::new(|| tokio::sync::Mutex::new(()));
-
-fn assert_runtime_capabilities_omit_legacy_labels(text: &str) {
-    for banned in [
-        "<runtime_prompt",
-        "mode=\"",
-        "approval=\"",
-        "allow_shell=",
-        "Agent",
-        "Plan",
-        "YOLO",
-        "agent\"",
-        "plan\"",
-        "yolo\"",
-    ] {
-        assert!(
-            !text.contains(banned),
-            "runtime capability tag should omit legacy label {banned:?}: {text}"
-        );
-    }
-}
-
-struct ScopedCapacityMemoryDir {
-    previous: Option<OsString>,
-}
-
-impl ScopedCapacityMemoryDir {
-    fn set(path: &Path) -> Self {
-        let previous = std::env::var_os("DEEPSEEK_CAPACITY_MEMORY_DIR");
-        // Safety: capacity-memory tests serialize access with CAPACITY_MEMORY_ENV_LOCK
-        // and restore the original value in Drop.
-        unsafe {
-            std::env::set_var("DEEPSEEK_CAPACITY_MEMORY_DIR", path);
-        }
-        Self { previous }
-    }
-}
-
-impl Drop for ScopedCapacityMemoryDir {
-    fn drop(&mut self) {
-        // Safety: capacity-memory tests serialize access with CAPACITY_MEMORY_ENV_LOCK.
-        unsafe {
-            if let Some(previous) = self.previous.take() {
-                std::env::set_var("DEEPSEEK_CAPACITY_MEMORY_DIR", previous);
-            } else {
-                std::env::remove_var("DEEPSEEK_CAPACITY_MEMORY_DIR");
-            }
-        }
-    }
-}
 
 struct ScopedDeepSeekApiKey {
     previous: Option<OsString>,
@@ -95,15 +43,6 @@ impl Drop for ScopedDeepSeekApiKey {
             }
         }
     }
-}
-
-fn build_engine_with_capacity(capacity: CapacityControllerConfig) -> Engine {
-    let engine_config = EngineConfig {
-        capacity,
-        ..Default::default()
-    };
-    let (engine, _handle) = Engine::new(engine_config, &Config::default());
-    engine
 }
 
 fn catalog_tool(name: &str) -> Tool {
@@ -753,7 +692,7 @@ fn tool_error_messages_include_actionable_hints() {
 
     // "model" must not satisfy the "mode" pass-through check.
     let model_denied = ToolError::permission_denied("requested model is not allowed");
-    let formatted = format_tool_error(&model_denied, "agent_open");
+    let formatted = format_tool_error(&model_denied, "agent");
     assert!(
         formatted.contains("Adjust approval mode or request permission"),
         "{formatted}"
@@ -795,12 +734,7 @@ fn non_yolo_mode_retains_default_defer_policy() {
     assert!(!should_default_defer_tool("git_show", &always_load));
     assert!(!should_default_defer_tool("git_status", &always_load));
     assert!(!should_default_defer_tool("run_tests", &always_load));
-    assert!(!should_default_defer_tool("agent_open", &always_load));
-    // #2605: the fetch/close side of the sub-agent surface must also stay
-    // active so a first `agent_eval`/`agent_close` executes instead of
-    // hydrating its schema and forcing a double-invoke.
-    assert!(!should_default_defer_tool("agent_eval", &always_load));
-    assert!(!should_default_defer_tool("agent_close", &always_load));
+    assert!(!should_default_defer_tool("agent", &always_load));
     assert!(!should_default_defer_tool("read_file", &always_load));
     assert!(!should_default_defer_tool("web_search", &always_load));
     assert!(!should_default_defer_tool("write_file", &always_load));
@@ -1786,9 +1720,7 @@ fn build_tool_context_uses_typed_shell_policy_per_mode() {
     };
     let (engine, _handle) = Engine::new(config.clone(), &Config::default());
 
-    // Plan mode is shell-free: the runtime prompt reports
-    // `shell_access="none"`, so the typed policy must agree and expose no
-    // shell tools (switch to Agent to run commands). See `shell_policy_for_mode`.
+    // Plan mode is shell-free and exposes no shell tools.
     assert_eq!(
         engine.build_tool_context(AppMode::Plan, false).shell_policy,
         crate::worker_profile::ShellPolicy::None
@@ -2051,18 +1983,6 @@ async fn change_mode_refreshes_session_prompt_and_updates_session() {
         messages.iter().all(|message| message.role != "system"),
         "mode switch must not persist appended system messages: {messages:?}"
     );
-    assert!(
-        messages.iter().all(|message| {
-            message.content.iter().all(|block| {
-                !matches!(
-                    block,
-                    ContentBlock::Text { text, .. }
-                        if text.contains("<cw_runtime_capabilities")
-                )
-            })
-        }),
-        "runtime prompt tags should be request-time metadata, not session history"
-    );
 }
 
 #[test]
@@ -2074,24 +1994,13 @@ fn turn_approval_mode_prefers_auto_approve_flag() {
         ApprovalMode::Auto
     );
     assert_eq!(
-        approval_mode_for(
-            AppMode::Agent,
-            agent_approval_mode_for_turn(true, ApprovalMode::Never),
-        ),
+        agent_approval_mode_for_turn(true, ApprovalMode::Never),
         ApprovalMode::Auto
-    );
-    assert_eq!(
-        approval_mode_for(AppMode::Yolo, ApprovalMode::Suggest),
-        ApprovalMode::Auto
-    );
-    assert_eq!(
-        approval_mode_for(AppMode::Plan, ApprovalMode::Auto),
-        ApprovalMode::Never
     );
 }
 
 #[test]
-fn runtime_prompt_is_projected_without_persisting_to_session_messages() {
+fn messages_with_turn_metadata_returns_stored_session_messages() {
     use crate::tui::approval::ApprovalMode;
 
     let tmp = tempdir().expect("tempdir");
@@ -2115,28 +2024,13 @@ fn runtime_prompt_is_projected_without_persisting_to_session_messages() {
     let request_messages = engine.messages_with_turn_metadata();
 
     assert_eq!(&*engine.session.messages, &*stored);
-    assert_eq!(request_messages.len(), stored.len() + 1);
+    assert_eq!(request_messages.len(), stored.len());
     assert!(
         request_messages
             .iter()
             .all(|message| message.role != "system"),
-        "runtime prompts must not create appended system messages"
+        "model request projection must not create appended system messages"
     );
-    let runtime = request_messages.last().expect("runtime prompt message");
-    assert_eq!(runtime.role, "user");
-    let ContentBlock::Text { text, .. } = runtime.content.first().expect("runtime prompt text")
-    else {
-        panic!("expected text runtime prompt");
-    };
-    assert!(text.contains("<cw_runtime_capabilities"));
-    assert!(text.contains("tool_profile=\"read_only\""));
-    assert!(text.contains("write_access=\"none\""));
-    assert!(text.contains("shell_access=\"none\""));
-    assert!(
-        text.contains("approval_gate=\"blocked\""),
-        "read-only posture should project its fixed blocked review gate: {text}"
-    );
-    assert_runtime_capabilities_omit_legacy_labels(text);
 }
 
 #[tokio::test]
@@ -2157,9 +2051,7 @@ async fn change_mode_op_updates_current_mode_and_emits_status() {
         .await
         .expect("send change mode");
 
-    // Expect a SessionUpdated event confirming the mode change. The per-turn
-    // capability tag carries the effective runtime posture in every request, so
-    // no separate persistence of a mode_change runtime event is needed.
+    // Expect a SessionUpdated event confirming the mode change.
     let mut rx = handle.rx_event.write().await;
     let session_updated = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
         .await
@@ -2169,16 +2061,8 @@ async fn change_mode_op_updates_current_mode_and_emits_status() {
         panic!("should emit SessionUpdated after mode change, got: {session_updated:?}");
     };
     assert!(
-        messages.iter().all(|message| {
-            message.content.iter().all(|block| {
-                !matches!(
-                    block,
-                    ContentBlock::Text { text, .. }
-                        if text.contains("<cw_runtime_capabilities")
-                )
-            })
-        }),
-        "runtime prompt tags must not be persisted into session messages after mode change"
+        messages.iter().all(|message| message.role != "system"),
+        "mode switch must not persist synthetic system messages: {messages:?}"
     );
 
     // Also expect a status event
@@ -2407,7 +2291,7 @@ fn subagent_results_are_summarized_before_parent_context_insertion() {
         .to_string(),
     );
 
-    let context = compact_tool_result_for_context("deepseek-v4-pro", "agent_eval", &output);
+    let context = compact_tool_result_for_context("deepseek-v4-pro", "agent", &output);
 
     assert!(context.contains("[sub-agent result summarized for parent context]"));
     assert!(context.contains("agent_1234abcd (explore) status=Completed"));
@@ -2704,57 +2588,8 @@ fn turn_metadata_omits_mode_policy() {
 }
 
 #[test]
-fn runtime_prompt_capabilities_update_with_change_mode_op() {
-    let tmp = tempdir().expect("tempdir");
-    let config = EngineConfig {
-        workspace: tmp.path().to_path_buf(),
-        ..Default::default()
-    };
-    let (mut engine, _handle) = Engine::new(config, &Config::default());
-
-    let workspace_msg = engine.runtime_prompt_message();
-    let ContentBlock::Text {
-        text: workspace_text,
-        ..
-    } = workspace_msg.content.first().expect("runtime prompt block")
-    else {
-        panic!("expected text runtime prompt");
-    };
-    assert!(workspace_text.contains("<cw_runtime_capabilities"));
-    assert!(
-        workspace_text.contains("tool_profile=\"workspace_write\""),
-        "initial posture should allow workspace writes, got: {workspace_text}"
-    );
-    assert!(workspace_text.contains("write_access=\"workspace\""));
-    assert_runtime_capabilities_omit_legacy_labels(workspace_text);
-
-    // Switch to full access. runtime_prompt_message should reflect capabilities,
-    // not the UI mode label.
-    engine.current_mode = AppMode::Yolo;
-    let full_access_msg = engine.runtime_prompt_message();
-    let ContentBlock::Text {
-        text: full_access_text,
-        ..
-    } = full_access_msg
-        .content
-        .first()
-        .expect("runtime prompt block")
-    else {
-        panic!("expected text runtime prompt");
-    };
-    assert!(
-        full_access_text.contains("tool_profile=\"full_access\""),
-        "posture after change should allow full access, got: {full_access_text}"
-    );
-    assert!(full_access_text.contains("write_access=\"full_disk\""));
-    assert!(full_access_text.contains("approval_gate=\"preapproved\""));
-    assert_runtime_capabilities_omit_legacy_labels(full_access_text);
-}
-
-#[test]
 fn current_mode_field_assignment_takes_effect_synchronously() {
-    // Basic unit-level invariant: the current_mode field mutates as expected
-    // and the per-turn capability tag reflects the current runtime posture.
+    // Basic unit-level invariant: the current_mode field mutates as expected.
     // Op::ChangeMode dispatch through the run loop is exercised by the
     // integration test change_mode_op_updates_current_mode_and_emits_status.
     let tmp = tempdir().expect("tempdir");
@@ -2766,45 +2601,8 @@ fn current_mode_field_assignment_takes_effect_synchronously() {
     let (mut engine, _handle) = Engine::new(config, &Config::default());
     assert_eq!(engine.current_mode, AppMode::Agent);
 
-    // Verify runtime tag in the initial workspace-write posture.
-    let workspace_messages = engine.messages_with_turn_metadata();
-    let workspace_tag = workspace_messages.last().expect("runtime tag message");
-    let ContentBlock::Text {
-        text: workspace_text,
-        ..
-    } = workspace_tag.content.first().expect("text block")
-    else {
-        panic!("expected text runtime tag in workspace-write posture");
-    };
-    assert!(
-        workspace_text.contains("tool_profile=\"workspace_write\""),
-        "workspace-write posture should produce matching runtime tag, got: {workspace_text}"
-    );
-    assert_runtime_capabilities_omit_legacy_labels(workspace_text);
-
-    // Switch to full access.
     engine.current_mode = AppMode::Yolo;
     assert_eq!(engine.current_mode, AppMode::Yolo);
-
-    // Verify runtime tag reflects full access with a preapproved review gate.
-    let full_access_messages = engine.messages_with_turn_metadata();
-    let full_access_tag = full_access_messages.last().expect("runtime tag message");
-    let ContentBlock::Text {
-        text: full_access_text,
-        ..
-    } = full_access_tag.content.first().expect("text block")
-    else {
-        panic!("expected text runtime tag in full-access posture");
-    };
-    assert!(
-        full_access_text.contains("tool_profile=\"full_access\""),
-        "full-access posture should produce matching runtime tag, got: {full_access_text}"
-    );
-    assert!(
-        full_access_text.contains("approval_gate=\"preapproved\""),
-        "full-access posture should project preapproved review gate, got: {full_access_text}"
-    );
-    assert_runtime_capabilities_omit_legacy_labels(full_access_text);
 }
 
 #[test]
@@ -2857,7 +2655,7 @@ fn messages_with_turn_metadata_preserves_stored_messages_for_prefix_cache() {
         &first_request[..engine.session.messages.len()],
         &engine.session.messages[..]
     );
-    assert_eq!(first_request.len(), engine.session.messages.len() + 1);
+    assert_eq!(first_request.len(), engine.session.messages.len());
     assert_eq!(first_request.first(), Some(&first_user));
     assert_eq!(
         first_request.last().map(|message| message.role.as_str()),
@@ -2883,21 +2681,15 @@ fn messages_with_turn_metadata_preserves_stored_messages_for_prefix_cache() {
         &second_request[..engine.session.messages.len()],
         &engine.session.messages[..]
     );
-    assert_eq!(second_request.len(), engine.session.messages.len() + 1);
+    assert_eq!(second_request.len(), engine.session.messages.len());
     assert_eq!(second_request.first(), Some(&first_user));
-    let runtime = second_request.last().expect("runtime prompt");
-    let ContentBlock::Text { text, .. } = runtime.content.first().expect("runtime prompt text")
-    else {
-        panic!("expected runtime prompt text");
-    };
-    assert!(text.contains("<cw_runtime_capabilities"));
-    assert_runtime_capabilities_omit_legacy_labels(text);
+    assert_eq!(second_request.last(), engine.session.messages.last());
 }
 
 /// v0.8.11 regression: tool-result messages serialize to role="tool" on
 /// the wire but are stored as role="user" internally. `<turn_meta>` must
 /// be stored only on actual user-text messages. Request-time runtime metadata
-/// is appended separately and must not mutate tool-result messages.
+/// must not mutate tool-result messages.
 #[test]
 fn turn_metadata_skips_tool_result_messages() {
     let tmp = tempdir().expect("tempdir");
@@ -2942,9 +2734,7 @@ fn turn_metadata_skips_tool_result_messages() {
 
     // The stored trailing message is the tool result and MUST be untouched —
     // no Text block sneaking in front of the ToolResult block.
-    let trailing = messages
-        .get(messages.len().saturating_sub(2))
-        .expect("stored trailing message");
+    let trailing = messages.last().expect("stored trailing message");
     assert_eq!(trailing.role, "user");
     assert_eq!(trailing.content.len(), 1);
     assert!(matches!(
@@ -2967,13 +2757,6 @@ fn turn_metadata_skips_tool_result_messages() {
     };
     assert!(meta.starts_with("<turn_meta>\n"));
     assert!(meta.contains("src/lib.rs"));
-    assert!(
-        matches!(
-            messages.last().and_then(|message| message.content.first()),
-            Some(ContentBlock::Text { text, .. }) if text.contains("<cw_runtime_capabilities")
-        ),
-        "request projection should append transient runtime metadata"
-    );
 }
 
 /// User text must appear before turn_meta in the content array so that
@@ -3057,14 +2840,7 @@ fn turn_metadata_skips_when_only_tool_results_trail() {
         only.content.first(),
         Some(ContentBlock::ToolResult { .. })
     ));
-    assert_eq!(messages.len(), 2);
-    assert!(
-        matches!(
-            messages.last().and_then(|message| message.content.first()),
-            Some(ContentBlock::Text { text, .. }) if text.contains("<cw_runtime_capabilities")
-        ),
-        "request projection should still append transient runtime metadata"
-    );
+    assert_eq!(messages.len(), 1);
 }
 
 #[test]
@@ -3186,331 +2962,6 @@ fn compaction_summary_stays_in_stable_system_prompt() {
 
     assert!(prompt.contains(COMPACTION_SUMMARY_MARKER));
     assert!(!prompt.contains(WORKING_SET_SUMMARY_MARKER));
-}
-
-#[tokio::test]
-async fn pre_request_refresh_skips_compaction_below_normal_threshold() {
-    let capacity = CapacityControllerConfig {
-        enabled: true,
-        low_risk_max: 0.0,
-        medium_risk_max: 1.0,
-        min_turns_before_guardrail: 0,
-        ..Default::default()
-    };
-
-    let mut engine = build_engine_with_capacity(capacity.clone());
-    engine.config.capacity = capacity.clone();
-    engine.capacity_controller = CapacityController::new(capacity);
-    engine.turn_counter = 5;
-    engine
-        .capacity_controller
-        .mark_turn_start(engine.turn_counter);
-    engine.session.model = "deepseek-v4-pro".to_string();
-    engine.config.model = "deepseek-v4-pro".to_string();
-
-    for i in 0..20 {
-        engine.session.messages.push(Message {
-            role: "user".to_string(),
-            content: vec![ContentBlock::Text {
-                text: format!("small message {i}"),
-                cache_control: None,
-            }],
-        });
-    }
-
-    let before = engine.estimated_input_tokens();
-    let before_len = engine.session.messages.len();
-    let turn = TurnContext::new(10);
-    let applied = engine
-        .run_capacity_pre_request_checkpoint(&turn, None, AppMode::Agent)
-        .await;
-    let after = engine.estimated_input_tokens();
-
-    assert!(!applied);
-    assert_eq!(after, before);
-    assert_eq!(engine.session.messages.len(), before_len);
-}
-
-#[test]
-fn capacity_observation_uses_bare_kimi_context_window() {
-    // #3023: capacity math reads models::context_window_for_model directly,
-    // so bare Moonshot ids must resolve their real window, not the 128K
-    // legacy fallback.
-    let mut engine = build_engine_with_capacity(CapacityControllerConfig::default());
-    engine.session.model = "kimi-k2.6".to_string();
-    engine.session.messages.push(Message {
-        role: "user".to_string(),
-        content: vec![ContentBlock::Text {
-            text: "x".repeat(40_000),
-            cache_control: None,
-        }],
-    });
-
-    let estimated = engine.estimated_input_tokens() as f64;
-    let turn = TurnContext::new(1);
-    let observation = engine.capacity_observation(&turn);
-
-    let expected = estimated / 262_144.0;
-    assert!(
-        (observation.context_used_ratio - expected).abs() < 1e-9,
-        "context_used_ratio must use kimi-k2.6's 262,144-token window (got {})",
-        observation.context_used_ratio
-    );
-}
-
-#[tokio::test]
-async fn pre_request_refresh_invoked_when_medium_risk() {
-    let capacity = CapacityControllerConfig {
-        enabled: true,
-        low_risk_max: 0.0,
-        medium_risk_max: 1.0,
-        min_turns_before_guardrail: 0,
-        ..Default::default()
-    };
-
-    let mut engine = build_engine_with_capacity(capacity.clone());
-    engine.config.capacity = capacity.clone();
-    engine.capacity_controller = CapacityController::new(capacity);
-    engine.turn_counter = 5;
-    engine
-        .capacity_controller
-        .mark_turn_start(engine.turn_counter);
-
-    // Pin the model to an explicit 128k-context variant so the pressure ratio stays
-    // stable regardless of changes to the workspace-wide default model.
-    engine.session.model = "deepseek-v3.2-128k".to_string();
-    engine.config.model = "deepseek-v3.2-128k".to_string();
-
-    let long = "x".repeat(5_000);
-    for _ in 0..900 {
-        engine.session.messages.push(Message {
-            role: "user".to_string(),
-            content: vec![ContentBlock::Text {
-                text: long.clone(),
-                cache_control: None,
-            }],
-        });
-    }
-
-    let before = engine.estimated_input_tokens();
-    let turn = TurnContext::new(10);
-    let applied = engine
-        .run_capacity_pre_request_checkpoint(&turn, None, AppMode::Agent)
-        .await;
-    let after = engine.estimated_input_tokens();
-
-    assert!(applied);
-    assert!(after < before);
-}
-
-#[tokio::test]
-async fn post_tool_replay_invoked_when_high_non_severe_risk() {
-    let tmp = tempdir().expect("tempdir");
-    fs::write(tmp.path().join("sample.txt"), "hello replay").expect("write");
-
-    let capacity = CapacityControllerConfig {
-        enabled: true,
-        low_risk_max: 0.0,
-        medium_risk_max: 0.0,
-        severe_min_slack: -10.0,
-        severe_violation_ratio: 2.0,
-        min_turns_before_guardrail: 0,
-        ..Default::default()
-    };
-
-    let mut engine = build_engine_with_capacity(capacity.clone());
-    engine.session.workspace = tmp.path().to_path_buf();
-    engine.config.workspace = tmp.path().to_path_buf();
-    engine.config.capacity = capacity.clone();
-    engine.capacity_controller = CapacityController::new(capacity);
-    engine.turn_counter = 4;
-    engine
-        .capacity_controller
-        .mark_turn_start(engine.turn_counter);
-
-    let mut turn = TurnContext::new(10);
-    let mut tool_call = TurnToolCall::new(
-        "tool_read_1".to_string(),
-        "read_file".to_string(),
-        json!({ "path": "sample.txt" }),
-    );
-    tool_call.set_result(
-        "hello replay".to_string(),
-        std::time::Duration::from_millis(1),
-    );
-    turn.record_tool_call(tool_call);
-
-    let registry = ToolRegistryBuilder::new()
-        .with_read_only_file_tools()
-        .build(engine.build_tool_context(AppMode::Agent, false));
-
-    let restarted = engine
-        .run_capacity_post_tool_checkpoint(
-            &turn,
-            Some(&registry),
-            Arc::new(RwLock::new(())),
-            None,
-            0,
-            0,
-        )
-        .await;
-
-    assert!(!restarted);
-    let has_verification_note = engine.session.messages.iter().any(|msg| {
-        msg.content.iter().any(|block| match block {
-            ContentBlock::ToolResult { content, .. } => content.contains("[verification replay]"),
-            _ => false,
-        })
-    });
-    assert!(has_verification_note);
-}
-
-#[tokio::test]
-async fn error_escalation_triggers_replan_when_severe_or_repeated_failures() {
-    let _env_lock = CAPACITY_MEMORY_ENV_LOCK.lock().await;
-    let tmp = tempdir().expect("tempdir");
-    let _env = ScopedCapacityMemoryDir::set(tmp.path());
-
-    let capacity = CapacityControllerConfig {
-        enabled: true,
-        low_risk_max: 0.0,
-        medium_risk_max: 0.0,
-        min_turns_before_guardrail: 0,
-        ..Default::default()
-    };
-
-    let mut engine = build_engine_with_capacity(capacity.clone());
-    engine.config.capacity = capacity.clone();
-    engine.capacity_controller = CapacityController::new(capacity);
-    engine.turn_counter = 6;
-    engine
-        .capacity_controller
-        .mark_turn_start(engine.turn_counter);
-
-    for i in 0..10 {
-        engine.session.messages.push(Message {
-            role: if i % 2 == 0 { "user" } else { "assistant" }.to_string(),
-            content: vec![ContentBlock::Text {
-                text: format!("noise message {i}"),
-                cache_control: None,
-            }],
-        });
-    }
-    engine.session.messages.push(Message {
-        role: "user".to_string(),
-        content: vec![ContentBlock::Text {
-            text: "Please finish task".to_string(),
-            cache_control: None,
-        }],
-    });
-
-    let before_len = engine.session.messages.len();
-    let turn = TurnContext::new(10);
-    let restarted = engine
-        .run_capacity_error_escalation_checkpoint(&turn, 2, 2, &[])
-        .await;
-
-    assert!(restarted);
-    assert!(engine.session.messages.len() < before_len);
-    assert!(engine.session.messages.len() <= 2);
-
-    let records = load_last_k_capacity_records(&engine.session.id, 1).expect("load memory");
-    assert!(!records.is_empty());
-    assert!(!records[0].canonical_state.goal.is_empty());
-}
-
-/// v0.8.11: `CapacityControllerConfig::default()` ships with
-/// `enabled = false`. The capacity controller's destructive
-/// interventions (TargetedContextRefresh silently runs compaction;
-/// VerifyAndReplan clears the session message log) silently rewrote
-/// or nuked the user's transcript ("resetting plan" footer +
-/// black-screen symptom). v0.8.11 commits to "trust the model with
-/// the full 1M-token context, only compact on explicit user
-/// /compact" — auto-managing the prefix contradicts that posture.
-/// Power users can still opt in via `capacity.enabled = true`.
-#[tokio::test]
-async fn capacity_disabled_by_default_keeps_messages_intact() {
-    let _env_lock = CAPACITY_MEMORY_ENV_LOCK.lock().await;
-    let tmp = tempdir().expect("tempdir");
-    let _env = ScopedCapacityMemoryDir::set(tmp.path());
-
-    // Default config — what real users get.
-    let mut engine = build_engine_with_capacity(CapacityControllerConfig::default());
-    assert!(
-        !engine.config.capacity.enabled,
-        "capacity controller must be off by default in v0.8.11+"
-    );
-    engine.turn_counter = 6;
-    engine
-        .capacity_controller
-        .mark_turn_start(engine.turn_counter);
-
-    for i in 0..10 {
-        engine.session.messages.push(Message {
-            role: if i % 2 == 0 { "user" } else { "assistant" }.to_string(),
-            content: vec![ContentBlock::Text {
-                text: format!("noise message {i}"),
-                cache_control: None,
-            }],
-        });
-    }
-    engine.session.messages.push(Message {
-        role: "user".to_string(),
-        content: vec![ContentBlock::Text {
-            text: "Please finish task".to_string(),
-            cache_control: None,
-        }],
-    });
-
-    let before_len = engine.session.messages.len();
-    let turn = TurnContext::new(10);
-    let restarted = engine
-        .run_capacity_error_escalation_checkpoint(&turn, 2, 2, &[])
-        .await;
-
-    // Capacity is disabled → no replan, no message clear.
-    assert!(!restarted);
-    assert_eq!(engine.session.messages.len(), before_len);
-}
-
-#[tokio::test]
-async fn controller_disabled_keeps_behavior_unchanged() {
-    let capacity = CapacityControllerConfig {
-        enabled: false,
-        ..Default::default()
-    };
-
-    let mut engine = build_engine_with_capacity(capacity.clone());
-    engine.config.capacity = capacity.clone();
-    engine.capacity_controller = CapacityController::new(capacity);
-    engine.turn_counter = 3;
-    engine
-        .capacity_controller
-        .mark_turn_start(engine.turn_counter);
-
-    let long = "y".repeat(5_000);
-    for _ in 0..120 {
-        engine.session.messages.push(Message {
-            role: "user".to_string(),
-            content: vec![ContentBlock::Text {
-                text: long.clone(),
-                cache_control: None,
-            }],
-        });
-    }
-
-    let before = engine.estimated_input_tokens();
-    let before_len = engine.session.messages.len();
-    let turn = TurnContext::new(10);
-    let applied = engine
-        .run_capacity_pre_request_checkpoint(&turn, None, AppMode::Agent)
-        .await;
-    let after = engine.estimated_input_tokens();
-    let after_len = engine.session.messages.len();
-
-    assert!(!applied);
-    assert_eq!(before, after);
-    assert_eq!(before_len, after_len);
 }
 
 #[test]
@@ -4208,57 +3659,6 @@ fn tool_failure_audit_payload_carries_category_and_severity() {
     assert_eq!(payload["category"], "timeout");
     assert_eq!(payload["severity"], "warning");
     assert_eq!(payload["success"], false);
-}
-
-/// Capacity escalation sees `ErrorCategory::InvalidInput` as a context-overflow
-/// signal that must escalate even on the first failure (no consecutive
-/// requirement). The previous string-matching path scanned the message for
-/// "context length" — categories give us a typed contract instead.
-#[test]
-fn capacity_escalation_treats_invalid_input_as_overflow_signal() {
-    use crate::error_taxonomy::ErrorCategory;
-
-    // Replays the categorization branches inside
-    // `run_capacity_error_escalation_checkpoint`. Keeping the assertions on
-    // the typed surface (slice of `ErrorCategory`) means this test fails
-    // loudly if a future refactor reverts to substring matching.
-    let categories: &[ErrorCategory] = &[ErrorCategory::InvalidInput];
-    let has_context_overflow = categories.contains(&ErrorCategory::InvalidInput);
-    assert!(has_context_overflow);
-
-    let only_transient = !categories.is_empty()
-        && categories.iter().all(|c| {
-            matches!(
-                c,
-                ErrorCategory::Network | ErrorCategory::RateLimit | ErrorCategory::Timeout
-            )
-        });
-    assert!(!only_transient);
-}
-
-/// Transient categories (network / rate limit / timeout) must NOT escalate by
-/// themselves — those resolve via the existing retry loop and shouldn't
-/// trigger a capacity-driven replan.
-#[test]
-fn capacity_escalation_skips_pure_transient_categories() {
-    use crate::error_taxonomy::ErrorCategory;
-
-    let categories: &[ErrorCategory] = &[
-        ErrorCategory::Network,
-        ErrorCategory::RateLimit,
-        ErrorCategory::Timeout,
-    ];
-    let has_context_overflow = categories.contains(&ErrorCategory::InvalidInput);
-    assert!(!has_context_overflow);
-
-    let only_transient = !categories.is_empty()
-        && categories.iter().all(|c| {
-            matches!(
-                c,
-                ErrorCategory::Network | ErrorCategory::RateLimit | ErrorCategory::Timeout
-            )
-        });
-    assert!(only_transient);
 }
 
 // ── #136: post-edit LSP diagnostics hook ─────────────────────────────────

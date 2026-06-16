@@ -13,9 +13,9 @@ use crate::tui::file_mention::{
 };
 use crate::tui::footer_ui::{
     active_tool_status_label, footer_auxiliary_spans, footer_balance_spans, footer_cache_spans,
-    footer_coherence_spans, footer_session_tokens_spans, footer_state_label,
-    footer_status_line_spans, format_context_budget, format_token_count_compact,
-    friendly_subagent_progress, render_footer_from,
+    footer_session_tokens_spans, footer_state_label, footer_status_line_spans,
+    format_context_budget, format_token_count_compact, friendly_subagent_progress,
+    render_footer_from,
 };
 use crate::tui::history::{
     ExecCell, ExecSource, GenericToolCell, HistoryCell, SubAgentCell, ToolCell, ToolStatus,
@@ -4276,7 +4276,7 @@ fn stall_reason_provider_wait_flags_pending_dispatch() {
     let mut app = create_test_app();
     app.is_loading = true;
     app.turn_started_at = Some(Instant::now() - Duration::from_secs(31));
-    app.pending_subagent_dispatch = Some("agent_spawn".to_string());
+    app.pending_subagent_dispatch = Some("agent".to_string());
 
     let reason = crate::tui::footer_ui::stall_reason(&app).expect("stalled turn has a reason");
     assert!(
@@ -4649,46 +4649,6 @@ fn footer_status_line_spans_truncate_long_model_names() {
     let line = spans_text(&footer_status_line_spans(&app, 40));
     assert!(line.contains("..."));
     assert!(UnicodeWidthStr::width(line.as_str()) <= 40);
-}
-
-#[test]
-fn footer_coherence_chip_hides_healthy_and_uses_clear_labels() {
-    let mut app = create_test_app();
-
-    app.coherence_state = crate::core::coherence::CoherenceState::Healthy;
-    assert!(
-        footer_coherence_spans(&app).is_empty(),
-        "healthy state should produce no footer chip"
-    );
-
-    // GettingCrowded is intentionally suppressed — see the rationale in
-    // `footer_coherence_spans`. The footer only surfaces active engine
-    // interventions; soft pressure hints stay quiet.
-    app.coherence_state = crate::core::coherence::CoherenceState::GettingCrowded;
-    assert!(
-        footer_coherence_spans(&app).is_empty(),
-        "GettingCrowded should not surface a footer chip; only active interventions do"
-    );
-
-    let cases = [
-        (
-            crate::core::coherence::CoherenceState::RefreshingContext,
-            "refreshing context",
-        ),
-        (
-            crate::core::coherence::CoherenceState::VerifyingRecentWork,
-            "verifying",
-        ),
-        (
-            crate::core::coherence::CoherenceState::ResettingPlan,
-            "resetting plan",
-        ),
-    ];
-
-    for (state, expected) in cases {
-        app.coherence_state = state;
-        assert_eq!(spans_text(&footer_coherence_spans(&app)), expected);
-    }
 }
 
 #[test]
@@ -8173,7 +8133,7 @@ fn activity_detail_fallback_prefers_live_activity_context() {
     active.push_tool(
         "active-1",
         HistoryCell::Tool(ToolCell::Generic(GenericToolCell {
-            name: "agent_eval".to_string(),
+            name: "agent".to_string(),
             status: ToolStatus::Running,
             input_summary: Some("agent_id: agent_af58ba3a".to_string()),
             output: None,
@@ -9073,7 +9033,6 @@ fn render_footer_from_with_empty_items_blanks_every_segment() {
     assert_eq!(props.mode_label, "");
     assert!(props.model.is_empty());
     assert!(props.cost.is_empty());
-    assert!(props.coherence.is_empty());
     assert!(props.agents.is_empty());
     assert!(props.cache.is_empty());
 }

@@ -4,14 +4,9 @@
 //! parallel-tool fanout out of `engine.rs`; the turn loop still owns planning,
 //! approval, and how tool results are written back into session state.
 
-use std::{fs::OpenOptions, future::Future, io::Write, sync::Arc, time::Duration};
+use std::{fs::OpenOptions, io::Write, sync::Arc, time::Duration};
 
 use super::*;
-
-#[cfg(test)]
-const TOOL_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(10);
-#[cfg(not(test))]
-const TOOL_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 
 /// RAII guard that pauses the TUI's terminal-state ownership for the duration
 /// of an interactive tool, then restores it on drop.
@@ -157,35 +152,6 @@ pub(super) fn emit_tool_audit(event: serde_json::Value) {
     }
 }
 
-async fn await_tool_with_heartbeat<F, T>(
-    tool_id: String,
-    tx_event: mpsc::Sender<Event>,
-    future: F,
-) -> T
-where
-    F: Future<Output = T>,
-{
-    tokio::pin!(future);
-    let mut ticker = tokio::time::interval(TOOL_HEARTBEAT_INTERVAL);
-    ticker.tick().await;
-
-    loop {
-        tokio::select! {
-            biased;
-
-            result = &mut future => return result,
-            _ = ticker.tick() => {
-                let _ = tx_event
-                    .send(Event::ToolCallProgress {
-                        id: tool_id.clone(),
-                        output: String::new(),
-                    })
-                    .await;
-            }
-        }
-    }
-}
-
 impl Engine {
     pub(super) async fn execute_mcp_tool_with_pool(
         pool: Arc<AsyncMutex<McpPool>>,
@@ -318,33 +284,6 @@ impl Engine {
 
         ToolResult::json(&ParallelToolResult { results })
             .map_err(|e| ToolError::execution_failed(e.to_string()))
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(super) async fn execute_tool_with_heartbeat(
-        tool_id: String,
-        lock: Arc<RwLock<()>>,
-        supports_parallel: bool,
-        interactive: bool,
-        tx_event: mpsc::Sender<Event>,
-        tool_name: String,
-        tool_input: serde_json::Value,
-        registry: Option<&crate::tools::ToolRegistry>,
-        mcp_pool: Option<Arc<AsyncMutex<McpPool>>>,
-        context_override: Option<crate::tools::ToolContext>,
-    ) -> Result<ToolResult, ToolError> {
-        let future = Self::execute_tool_with_lock(
-            lock,
-            supports_parallel,
-            interactive,
-            tx_event.clone(),
-            tool_name,
-            tool_input,
-            registry,
-            mcp_pool,
-            context_override,
-        );
-        await_tool_with_heartbeat(tool_id, tx_event, future).await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -545,57 +484,6 @@ mod tests {
             .expect("resume event")
             .expect("event channel still open");
         assert!(matches!(resumed, Event::ResumeEvents));
-    }
-
-    #[tokio::test]
-    async fn tool_heartbeat_emits_progress_for_slow_future() {
-        let (tx, mut rx) = mpsc::channel(4);
-        let task = tokio::spawn(await_tool_with_heartbeat(
-            "tool-slow".to_string(),
-            tx,
-            async {
-                tokio::time::sleep(Duration::from_millis(35)).await;
-                "done"
-            },
-        ));
-
-        let event = tokio::time::timeout(Duration::from_millis(200), rx.recv())
-            .await
-            .expect("progress event should arrive before slow future completes")
-            .expect("event channel should stay open");
-
-        match event {
-            Event::ToolCallProgress { id, output } => {
-                assert_eq!(id, "tool-slow");
-                assert!(output.is_empty());
-            }
-            other => panic!("expected ToolCallProgress, got {other:?}"),
-        }
-        assert_eq!(task.await.expect("heartbeat task joined"), "done");
-    }
-
-    #[tokio::test]
-    async fn tool_heartbeat_does_not_emit_for_fast_future() {
-        let (tx, mut rx) = mpsc::channel(4);
-        let result = await_tool_with_heartbeat("tool-fast".to_string(), tx, async { "done" }).await;
-
-        assert_eq!(result, "done");
-        assert!(rx.try_recv().is_err());
-    }
-
-    #[tokio::test]
-    async fn tool_heartbeat_stops_after_future_completes() {
-        let (tx, mut rx) = mpsc::channel(4);
-        let result = await_tool_with_heartbeat("tool-once".to_string(), tx, async {
-            tokio::time::sleep(Duration::from_millis(15)).await;
-            "done"
-        })
-        .await;
-        assert_eq!(result, "done");
-
-        while rx.try_recv().is_ok() {}
-        tokio::time::sleep(TOOL_HEARTBEAT_INTERVAL * 2).await;
-        assert!(rx.try_recv().is_err());
     }
 
     #[test]

@@ -1,36 +1,37 @@
 # Sub-Agents
 
 Sub-agents are the user-facing vocabulary for nested worker assignments: a
-parent opens a focused role (`explore`, `review`, `implementer`, `verifier`,
-...) and gets back an `agent_id` plus session name while the worker runs.
+parent launches a focused role (`explore`, `review`, `implementer`, `verifier`,
+...) through `agent` and gets back an `agent_id` plus transcript handle while
+the worker runs.
 
 Architecturally, sub-agents should not be a second execution substrate. The
 durable primitive is the fleet-backed worker run described in
 [`AGENT_RUNTIME.md`](AGENT_RUNTIME.md): retries, terminal status, receipts,
-artifact refs, inspection, and restart behavior belong there. `agent_open`
-stays as the familiar nested-agent launcher, but detached work should converge
-on the same lifecycle as Agent Fleet.
+artifact refs, inspection, and restart behavior belong there. The
+model-facing launcher is the single `agent` tool and detached work should
+converge on the same lifecycle as Agent Fleet.
 
-The current `agent_open` implementation is a compatibility path while that
+The current `agent` implementation delegates to the durable sub-agent runtime
+while that
 cutover completes. It can still be useful for short in-session delegation, but
 if a child fails once on a transient provider timeout while an equivalent fleet
 worker would retry from the ledger, that is a runtime unification gap. For work
 that must survive provider hiccups, process restarts, sleep, or remote
 execution, prefer Fleet or a WhaleFlow-backed fleet run.
 
-Sub-agents inherit the parent's tool registry by default. `agent_open` launches
-them as detached background work: cancelling the parent turn stops the parent
-wait/eval path, but it does not kill already-opened child sessions. Use
-`agent_close` to cancel a running child explicitly.
+Sub-agents inherit the parent's tool registry by default, but child agents are
+leaf workers: they do not receive `agent` or nested lifecycle tools. `agent`
+launches detached background work: cancelling the parent turn stops the parent
+wait path, but it does not kill already-opened child runs.
 
 This doc covers the role taxonomy and current compatibility controls. The active
-orchestration surface is
-`agent_open`, `agent_eval`, and `agent_close`; see `prompts/base.md`
-"Sub-Agent Strategy" and the in-line tool descriptions.
+orchestration surface is `agent`; see `prompts/base.md` "Sub-Agent Strategy"
+and the in-line tool description.
 
 ## Role taxonomy
 
-The `type` field on `agent_open` selects a system-prompt posture for the child
+The `type` field on `agent` selects a system-prompt posture for the child
 (`agent_type` is accepted as a compatibility alias). Each role is a distinct
 stance toward the work — not just a different label.
 
@@ -65,7 +66,7 @@ turn's user message.
 
 ## Context forking
 
-`agent_open` starts fresh by default: the child gets its role prompt plus the
+`agent` starts fresh by default: the child gets its role prompt plus the
 task you pass. Use `fork_context: true` when the child should continue from
 the parent's current request prefix instead. In fork mode the runtime keeps the
 parent prefill/prompt prefix byte-identical where available, appends a
@@ -105,7 +106,8 @@ transcript.
   candidates under RISKS.
 - **`custom`** — only when the parent needs to constrain the tool
   set explicitly. Pass the allowlist via the `allowed_tools` field
-  on `agent_open`.
+  on legacy/internal sub-agent records; the model-facing `agent` tool keeps the
+  public schema intentionally small.
 
 ### Aliases
 
@@ -119,7 +121,6 @@ The model can spell each role multiple ways:
 | `review`      | `reviewer`, `code-review`, `code_review`                         |
 | `implementer` | `implement`, `implementation`, `builder`                         |
 | `verifier`    | `verify`, `verification`, `validator`, `tester`                  |
-| `tool_agent`  | `tool-agent`, `toolagent`, `executor`, `execution`, `fin`        |
 | `custom`      | (none; explicit `allowed_tools` array required)                  |
 
 All matching is case-insensitive. Unknown values produce a typed
@@ -130,19 +131,18 @@ the next turn.
 
 The current compatibility dispatcher caps concurrent sub-agents at 10 by default
 (configurable via `[subagents].max_concurrent` in `~/.codewhale/config.toml`,
-hard ceiling 20). When the parent hits the cap, `agent_open` returns
-an error with the cap value; the parent should use `agent_eval` to wait for a
-running agent to complete, or `agent_close` to cancel a running agent, before
-retrying.
+hard ceiling 20). When the parent hits the cap, `agent` returns an error with
+the cap value; the parent should wait for background completion events before
+opening more agents.
 
 That `max_concurrent` value is a ceiling on **tracked** agents, not a measure of
 how many execute at once. Direct children are additionally gated by
 `[subagents].interactive_max_launch` (default **4**): only about four run
 concurrently and the rest **queue** for a slot. The practical guidance for the
-model is therefore to open a small batch (~4), poll with nonblocking
-`agent_eval`, and open the next batch as slots free — not to fire a large burst
-of `agent_open` calls in one turn. (See the freeze-fix work for why a big
-simultaneous fanout previously wedged the TUI: #3216 / #2211.)
+model is therefore to open a small batch (up to about four), keep working, and
+consume completion events as slots free. Do not fire a large burst of `agent`
+calls in one turn. (See the freeze-fix work for why a big simultaneous fanout
+previously wedged the TUI: #3216 / #2211.)
 
 The cap counts only **running** agents — completed / failed /
 cancelled records persist for inspection but don't occupy a slot.
@@ -165,7 +165,7 @@ review_model   = "deepseek-v4-pro"     # review
 custom_model   = "deepseek-v4-pro"     # custom
 
 [subagents.models]
-# Free-form role → model map; any role alias accepted by agent_open works.
+# Free-form role → model map; any role alias accepted by agent works.
 implementation = "deepseek-v4-pro"
 ```
 
@@ -183,9 +183,9 @@ model = "kimi-k2.7-code"
 worker_model = "kimi-k2.6"
 ```
 
-Spawn-time `model` arguments on `agent_open` are validated the same way; an
-invalid id on the official DeepSeek API fails the spawn with the accepted-id
-list instead of an opaque provider 400.
+Model ids are validated the same way when applied to a child route; an invalid
+id on the official DeepSeek API fails the spawn with the accepted-id list
+instead of an opaque provider 400.
 
 With `/model auto`, sub-agent routing is provider-aware too: providers with a
 known big/cheap pair (DeepSeek, and the hosted DeepSeek routes on NVIDIA NIM,
@@ -200,7 +200,7 @@ per-step timeout so a single stuck request can't pin the parent's
 completion wakeup channel indefinitely. The default is `120` seconds,
 which matches the legacy hardcoded value. Long-thinking children that
 legitimately exceed that, for example heavy plan or review work behind
-`agent_open`, can extend the timeout in `~/.codewhale/config.toml`:
+`agent`, can extend the timeout in `~/.codewhale/config.toml`:
 
 ```toml
 [subagents]
@@ -214,8 +214,8 @@ Values are clamped to `1..=1800`. `0` and `unset` keep the legacy
 
 Running agents also track manager-visible progress. If a child stops emitting
 progress for the heartbeat window, the manager auto-cancels it, releases its
-sub-agent slot, and keeps the cancelled record inspectable via `agent_eval` /
-`agent_list`. The default is 5 minutes:
+sub-agent slot, and keeps the cancelled record inspectable through the returned
+transcript handle and persisted worker record. The default is 5 minutes:
 
 ```toml
 [subagents]
@@ -245,9 +245,9 @@ Each `SubAgentManager` instance assigns itself a fresh `session_boot_id` on
 construction. Every new session stamps the agent with that id; the workspace
 state file records it for restart recovery.
 
-`agent_eval` and the sidebar/status projections focus on current-session
-agents by default. Prior-session agents that are not still running are treated
-as archived records so the model does not mistake stale work for live work.
+Sidebar/status projections focus on current-session agents by default.
+Prior-session agents that are not still running are treated as archived records
+so the model does not mistake stale work for live work.
 
 Records that loaded from a pre-#405 persisted state file (no
 `session_boot_id` field) classify as prior-session because the
@@ -262,20 +262,15 @@ ledger: it stores `run_id`, objective, role/model,
 workspace/branch, lifecycle events, artifact refs, follow-up target, takeover
 target, usage provenance, and verification provenance.
 
-`agent_eval` returns these fields at the top level of the session projection and
-inside `worker_record`. It is nonblocking by default: use it to poll status or
-deliver follow-up input while the parent keeps coordinating. Pass `block:true`
-only when deliberately waiting for a terminal child result. A running or
-continuable interrupted child should be continued through the returned
-`follow_up` target (`agent_eval` with the same agent id or session name). A
-local takeover should use the returned `takeover` instructions; unsupported
-future cases must say why instead of leaving the operator to guess.
+`agent` returns a session projection with these fields at the top level and
+inside `worker_record`. The normal parent contract is not polling: keep working
+and consume the completion event when the child finishes. If audit detail is
+needed, inspect the returned `transcript_handle` with `handle_read`.
 
-Follow-up delivery is explicit. If a message was delivered, the worker record
-stores a bounded preview and timestamp. If the child had already terminated,
-`agent_eval` still returns the projection and transcript handle, but records the
-undelivered follow-up reason so queued instructions do not disappear into UI
-state.
+Legacy follow-up delivery is retained only for old transcripts and internal
+recovery. If a message was delivered, the worker record stores a bounded preview
+and timestamp. New model-facing flows should open a replacement `agent` when a
+child's assignment no longer fits.
 
 Artifacts are symbolic refs. Use `handle_read` on the returned
 `transcript_handle` for transcript details, and treat `result_summary` as a

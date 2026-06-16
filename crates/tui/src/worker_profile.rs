@@ -3,13 +3,13 @@
 //! #414 / #426 / #1186).
 //!
 //! This is the **WhaleFlow substrate**: every detached worker — whether launched
-//! as a `agent_open` sub-agent or a Fleet worker — should run under a profile
+//! as an `agent` sub-agent or a Fleet worker — should run under a profile
 //! that bounds what it may do (permissions, shell access, tool scope, model
 //! route, recursion budget, foreground/background). A child profile is always
 //! **derived** from its parent and can never escalate beyond it.
 //!
 //! Scope: this module defines the contract and the parent→child derivation with
-//! tests. `agent_open` and Fleet worker records now build and persist these
+//! tests. `agent` and Fleet worker records now build and persist these
 //! profiles so parent-visible worker projections have a single capability
 //! contract. Runtime enforcement of every declared field remains incremental
 //! follow-up work (#3217).
@@ -142,7 +142,7 @@ pub struct WorkerRuntimeProfile {
 impl WorkerRuntimeProfile {
     /// The default profile for a role — the per-role posture. Mirrors the role
     /// stances documented in `docs/SUBAGENTS.md` (explore/plan/review are
-    /// read-only; verifier runs tests; implementer/general/tool write).
+    /// read-only; verifier runs tests; implementer/general write).
     #[must_use]
     pub fn for_role(role: SubAgentType) -> Self {
         let (permissions, shell) = match role {
@@ -155,7 +155,7 @@ impl WorkerRuntimeProfile {
             // Verifier: doesn't modify code, but runs the test suite.
             SubAgentType::Verifier => (PermissionSet::read_only(), ShellPolicy::Full),
             // Doers.
-            SubAgentType::Implementer | SubAgentType::General | SubAgentType::ToolAgent => {
+            SubAgentType::Implementer | SubAgentType::General => {
                 (PermissionSet::full(), ShellPolicy::Full)
             }
             // Custom starts locked down; the caller opens specific tools explicitly.
@@ -164,7 +164,7 @@ impl WorkerRuntimeProfile {
         // Cheap, machine-bound roles default to auto-routing (flash lane); the
         // rest inherit the session model.
         let model = match role {
-            SubAgentType::Explore | SubAgentType::ToolAgent => ModelRoute::Auto,
+            SubAgentType::Explore => ModelRoute::Auto,
             _ => ModelRoute::Inherit,
         };
         Self {

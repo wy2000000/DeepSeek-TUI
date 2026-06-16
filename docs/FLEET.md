@@ -8,7 +8,7 @@ converge on one durable runtime. In product language, a user may still "open a
 sub-agent"; in architecture language, durable nested work should be a
 fleet-backed worker with a role.
 
-Use Fleet rather than the compatibility `agent_open` path whenever the work
+Use Fleet rather than short-lived `agent` fanout whenever the work
 needs retry, sleep/restart survival, remote execution, receipts, or a ledgered
 audit trail. The initial CLI surface is:
 
@@ -42,7 +42,7 @@ can run on top of those modes when the task needs a continuous workflow.
 - **Fleet** is the execution substrate: headless workers, local/SSH hosts,
   trust policy, leases, heartbeats, logs, receipts, and status APIs.
 - **Swarm** is the high-fanout behavior inside WhaleFlow. It is gated in
-  v0.8.61: `/swarm` must not revive prompt-only `agent_open` fanout. It should
+  v0.8.61: `/swarm` must not revive prompt-only sub-agent fanout. It should
   compile into a WhaleFlow-backed fleet run once the durable worker and goal
   re-dispatch substrate is available.
 

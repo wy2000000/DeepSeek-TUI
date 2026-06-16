@@ -350,7 +350,6 @@
       }
       if (name === "turn.lifecycle") return "Turn status: " + (payload.status || "");
       if (name === "turn.completed") return "Turn completed";
-      if (name === "coherence.state") return JSON.stringify(payload, null, 2);
       return JSON.stringify(payload, null, 2);
     }
 
@@ -483,8 +482,7 @@
         "approval.required",
         "approval.decided",
         "approval.timeout",
-        "sandbox.denied",
-        "coherence.state"
+        "sandbox.denied"
       ];
       for (const name of names) {
         source.addEventListener(name, (ev) => {

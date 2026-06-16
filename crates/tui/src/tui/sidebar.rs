@@ -3406,7 +3406,7 @@ mod tests {
         active.push_tool(
             "tool-1",
             HistoryCell::Tool(ToolCell::Generic(GenericToolCell {
-                name: "agent_eval".to_string(),
+                name: "agent".to_string(),
                 status: ToolStatus::Running,
                 input_summary: Some("agent_id: agent_af58ba3a".to_string()),
                 output: None,
@@ -3429,8 +3429,8 @@ mod tests {
             "live section missing: {text:?}"
         );
         assert!(
-            text.iter().any(|line| line.contains("[~] agent_eval")),
-            "active agent_eval row missing: {text:?}"
+            text.iter().any(|line| line.contains("[~] agent")),
+            "active agent row missing: {text:?}"
         );
         assert!(
             !text.iter().any(|line| line.contains("No active tasks")),

@@ -3,7 +3,6 @@ use std::time::Instant;
 #[cfg(test)]
 use unicode_width::UnicodeWidthStr;
 
-use crate::core::coherence::CoherenceState;
 use crate::localization::{Locale, MessageId};
 use crate::palette;
 use crate::resource_telemetry::TokenThroughput;
@@ -470,7 +469,7 @@ fn collect_active_tool_status(
             // status. RLM is different today: it is a foreground tool call,
             // so keep it in the live tool footer until the async RLM
             // workbench lands (#513).
-            if matches!(generic.name.as_str(), "agent_open" | "agent_spawn") {
+            if generic.name == "agent" {
                 return;
             }
             snapshot.record(
@@ -518,11 +517,6 @@ pub(crate) fn render_footer_from(
         ("ready", app.ui_theme.text_muted)
     };
 
-    let coherence = if has(S::Coherence) {
-        footer_coherence_spans(app)
-    } else {
-        Vec::new()
-    };
     let agents = if has(S::Agents) {
         crate::tui::widgets::footer_agents_chip(running_agent_count(app), app.ui_locale)
     } else {
@@ -563,7 +557,6 @@ pub(crate) fn render_footer_from(
         toast,
         state_label,
         state_color,
-        coherence,
         agents,
         reasoning_replay,
         cache,
@@ -773,9 +766,8 @@ fn footer_output_throughput_label(app: &App) -> Option<String> {
 pub(crate) fn footer_auxiliary_spans(app: &App, max_width: usize) -> Vec<Span<'static>> {
     // Context % is already shown in the header signal bar — don't
     // duplicate it in the footer. The footer carries unique info only:
-    // prefix stability, coherence, in-flight sub-agents, reasoning
-    // replay tokens, cache hit rate, and session cost.
-    let coherence_spans = footer_coherence_spans(app);
+    // prefix stability, in-flight sub-agents, reasoning replay tokens, cache
+    // hit rate, and session cost.
     let agents_spans =
         crate::tui::widgets::footer_agents_chip(running_agent_count(app), app.ui_locale);
     let replay_spans = footer_reasoning_replay_spans(app);
@@ -795,7 +787,6 @@ pub(crate) fn footer_auxiliary_spans(app: &App, max_width: usize) -> Vec<Span<'s
     let shell_spans = crate::tui::widgets::footer_shell_chip(active_foreground_shell_running(app));
 
     let parts: Vec<&Vec<Span<'static>>> = [
-        &coherence_spans,
         &agents_spans,
         &replay_spans,
         &prefix_spans,
@@ -822,22 +813,6 @@ pub(crate) fn footer_auxiliary_spans(app: &App, max_width: usize) -> Vec<Span<'s
         }
     }
     Vec::new()
-}
-
-pub(crate) fn footer_coherence_spans(app: &App) -> Vec<Span<'static>> {
-    // Only surface coherence when the engine is actively intervening — the
-    // user-facing signal is "we're doing something different now," not
-    // "your conversation is getting complex," which the context-percent
-    // header already covers. `GettingCrowded` is just a soft hint, so we
-    // suppress it; the active interventions get their own visible label.
-    let (label, color) = match app.coherence_state {
-        CoherenceState::Healthy | CoherenceState::GettingCrowded => return Vec::new(),
-        CoherenceState::RefreshingContext => ("refreshing context", palette::STATUS_WARNING),
-        CoherenceState::VerifyingRecentWork => ("verifying", palette::DEEPSEEK_SKY),
-        CoherenceState::ResettingPlan => ("resetting plan", palette::STATUS_ERROR),
-    };
-
-    vec![Span::styled(label.to_string(), Style::default().fg(color))]
 }
 
 pub(crate) fn footer_cache_spans(app: &App) -> Vec<Span<'static>> {

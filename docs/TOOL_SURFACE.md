@@ -142,10 +142,9 @@ systems for the same run.
 
 Large logs and command outputs should be artifacts with compact summaries in the transcript. `task_gate_run` handles this automatically for active durable tasks.
 
-Sub-agent runs also expose a compact run receipt through `agent_eval`: `run_id`,
+Sub-agent runs expose a compact run receipt through `agent`: `run_id`,
 `follow_up`, `takeover`, `artifacts`, `usage`, `verification`, and
-`worker_record`. Follow-up delivery receipts record whether an `agent_eval`
-message actually reached the child or why it did not. Usage is marked
+`worker_record`. Usage is marked
 `unknown` until worker-level token accounting is available, and verification is
 `self_report_only` unless a separate gate or artifact proves the claim.
 
@@ -185,20 +184,18 @@ small `var_handle` objects, and `handle_read` retrieves bounded slices, counts,
 or JSON projections from the backing environment. This keeps the parent
 transcript small while preserving a recovery path to the full payload.
 
-The active model-facing sub-agent surface is persistent and intentionally small:
+The active model-facing sub-agent surface is intentionally small:
 
 | Tool | Niche |
 |---|---|
-| `agent_open` | Open a named sub-agent session for independent work. Returns a session projection immediately so the parent can keep coordinating. |
-| `agent_eval` | Send follow-up input or fetch the current projection/transcript handle for an existing session. Nonblocking by default; pass `block:true` only for a deliberate wait. |
-| `agent_close` | Cancel or release a sub-agent session by name or id. |
+| `agent` | Launch one focused child run. Returns an agent id, compact receipt, and transcript handle while the parent can keep coordinating. |
 
 See `agent.txt` for the delegation protocol and
 [`SUBAGENTS.md`](SUBAGENTS.md) for the role taxonomy
 (`general` / `explore` / `plan` / `review` / `implementer` /
 `verifier` / `custom`).
 
-`agent_open` defaults to a fresh child conversation. Pass
+`agent` defaults to a fresh child conversation. Pass
 `fork_context: true` for continuation-style work or multi-perspective reviews
 that should inherit the parent's context. In fork mode, the runtime preserves
 the parent prefill/prompt prefix byte-identically where available so DeepSeek's
@@ -270,23 +267,21 @@ reflect very different cost classes:
 
 | Tool | What each child does | Wall-clock | Token cost | Cap |
 |---|---|---|---|---|
-| `agent_open` | Full sub-agent loop (planning, tool calls, multi-turn streaming, can open children) | minutes | thousands of tokens | 10 in flight by default (`[subagents].max_concurrent`, hard ceiling 20) |
+| `agent` | Full sub-agent loop (planning, tool calls, multi-turn streaming) | minutes | thousands of tokens | 10 in flight by default (`[subagents].max_concurrent`, hard ceiling 20) |
 | `rlm_eval` helper `sub_query_batch` | One-shot non-streaming Chat Completions calls pinned to `deepseek-v4-flash` inside a live RLM session | seconds | ~hundreds of tokens | 16 per call |
 
 The caps appear in each tool's description and error messages so the model
 (and the user) can choose the right tool for the job. If one sub-agent is
 enough but you need parallel semantic lookups over the same loaded context,
 prefer `rlm_eval` with `sub_query_batch`; if each task needs its own
-tool-carrying agent loop, use `agent_open` and wait for running sessions to
-complete or cancel no-longer-needed running sessions with `agent_close`.
+tool-carrying agent loop, use `agent` and inspect the returned transcript
+handle when needed.
 
 ## Removed legacy aliases and surfaces
 
-v0.8.33 removed the old model-facing sub-agent fan-out surface from active
-prompting and tool catalogs. Do not use these names in new active guidance:
-`agent_spawn`, `agent_wait`, `agent_result`, `agent_send_input`,
-`agent_assign`, `agent_resume`, `agent_list`, `spawn_agent`,
-`delegate_to_agent`, `send_input`, and `close_agent`.
+The old model-facing sub-agent fan-out surface is removed from active prompting
+and tool catalogs. Do not use retired sub-agent lifecycle names in new active
+guidance.
 
 The old one-shot `rlm` model-facing tool is also replaced by persistent
 `rlm_open` / `rlm_eval` / `rlm_configure` / `rlm_close` sessions.
@@ -305,22 +300,6 @@ v0.9.0 adds the following hidden-compat aliases (#2682, #2683):
 All hidden aliases remain registered and callable so saved transcripts can
 replay without teaching new sessions the deprecated spelling.
 
-Historical compatibility results may include a `_deprecation` block shaped
-like this:
-
-```json
-{
-  "_deprecation": {
-    "this_tool": "spawn_agent",
-    "use_instead": "agent_open",
-    "removed_in": "0.8.33",
-    "message": "Tool 'spawn_agent' is deprecated; switch to 'agent_open'."
-  }
-}
-```
-
-This is a legacy/compatibility note, not the active recommended surface.
-
 ## Release smoke: verify the live names
 
 When validating a release, verify the model-visible registry names directly.
@@ -337,20 +316,18 @@ codewhale-tui --version
 Tool-surface smoke:
 
 ```bash
-rg -n '"handle_read"|"rlm_open"|"rlm_eval"|"rlm_configure"|"rlm_close"|"agent_open"|"agent_eval"|"agent_close"' crates/tui/src
-rg -n 'handle_read|rlm_open|rlm_eval|rlm_configure|rlm_close|agent_open|agent_eval|agent_close' docs crates/tui/src/prompts crates/tui/src/tools
+rg -n '"handle_read"|"rlm_open"|"rlm_eval"|"rlm_configure"|"rlm_close"|"agent"' crates/tui/src
+rg -n 'handle_read|rlm_open|rlm_eval|rlm_configure|rlm_close|agent' docs crates/tui/src/prompts crates/tui/src/tools
 ```
 
-The canonical live names (since v0.8.35, still current in v0.8.49):
+The canonical live names:
 
 - `handle_read`
 - `rlm_open`, `rlm_eval`, `rlm_configure`, `rlm_close`
-- `agent_open`, `agent_eval`, `agent_close`
+- `agent`
 
-The registry should not actively advertise the legacy one-shot names
-`agent_spawn`, `agent_wait`, `agent_result`, or the old foreground `rlm` tool
-outside legacy/removal notes. Historical changelog entries and compatibility
-code may still mention them.
+The registry should not actively advertise retired sub-agent lifecycle names or
+the old foreground `rlm` tool outside historical changelog entries.
 
 ## Additional registered tools (v0.8.49)
 

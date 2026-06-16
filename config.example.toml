@@ -586,7 +586,7 @@ osc8_links = true            # emit OSC 8 escapes around URLs (Cmd+click in iTer
 # built-in default; set [] to hide all configurable chips. You can also edit
 # this interactively with `/statusline`.
 # Supported keys: mode, model, cost, balance (DeepSeek / DeepSeekCN only),
-# status, coherence, agents,
+# status, agents,
 # reasoning_replay, prefix_stability, cache, context_percent, git_branch,
 # last_tool_elapsed (placeholder), rate_limit (placeholder), tokens.
 # status_items = ["mode", "model", "status", "git_branch", "tokens", "cache"]

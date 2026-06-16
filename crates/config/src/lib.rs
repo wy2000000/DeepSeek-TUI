@@ -1108,7 +1108,7 @@ pub struct FleetConfigToml {
 /// - [`DEFAULT_SPAWN_DEPTH`] is the default recursion budget (the sub-agent
 ///   runtime's `DEFAULT_MAX_SPAWN_DEPTH` is defined as this value).
 /// - [`MAX_SPAWN_DEPTH_CEILING`] is the hard safety cap; every configured
-///   value (fleet `max_spawn_depth`, `agent_open`'s `max_depth`) clamps to it.
+///   value (fleet `max_spawn_depth`, the `agent` tool's `max_depth`) clamps to it.
 ///
 /// A worker runs at `spawn_depth = 0` and may spawn while
 /// `spawn_depth + 1 <= max_spawn_depth`, so a depth of N affords N nested
@@ -1119,7 +1119,7 @@ pub const DEFAULT_SPAWN_DEPTH: u32 = 3;
 
 /// Hard ceiling on recursion depth for any worker/sub-agent. See
 /// [`DEFAULT_SPAWN_DEPTH`]. Raising this single constant lifts the limit
-/// everywhere (the fleet clamp and `agent_open` validation both read it).
+/// everywhere (the fleet clamp and `agent` validation both read it).
 pub const MAX_SPAWN_DEPTH_CEILING: u32 = 3;
 
 /// Headless worker execution constraints (#3027).
@@ -1141,7 +1141,7 @@ pub struct FleetExecConfig {
     /// Recursive child-agent budget for headless fleet workers.
     /// Defaults to [`DEFAULT_SPAWN_DEPTH`] (3) so a fleet worker has the SAME
     /// recursion budget as a standalone sub-agent — fleet and sub-agents are one
-    /// substrate, not two. Set 0 to block child `agent_open` (the root worker
+    /// substrate, not two. Set 0 to block child `agent` calls (the root worker
     /// still runs); the value is clamped to [`MAX_SPAWN_DEPTH_CEILING`].
     #[serde(default = "default_fleet_max_spawn_depth")]
     pub max_spawn_depth: u32,
@@ -7864,7 +7864,7 @@ fallback_providers = ["deepseek", "openrouter"]
     }
 
     #[test]
-    fn fleet_exec_config_default_matches_subagent_spawn_depth() {
+    fn fleet_exec_config_default_matches_subagent_depth() {
         // Fleet workers and standalone sub-agents share one recursion axis:
         // the fleet default equals DEFAULT_SPAWN_DEPTH (3) and affords >=3
         // nested delegation levels out of the box.

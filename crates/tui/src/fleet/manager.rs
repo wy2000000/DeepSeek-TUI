@@ -651,7 +651,7 @@ impl FleetManager {
         self.ledger.heartbeat(worker_id, &timestamp(), None, None)?;
 
         // Register with the sub-agent manager for headless worker tracking.
-        // The engine's agent_open path handles actual sub-agent spawning.
+        // The engine's agent path handles actual sub-agent spawning.
         if let Some(ref mgr) = self.sub_agent_manager
             && let Ok(guard) = mgr.try_write()
         {

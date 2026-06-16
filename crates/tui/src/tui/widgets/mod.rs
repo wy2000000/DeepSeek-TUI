@@ -4064,31 +4064,17 @@ mod tests {
         assert!(app.viewport.transcript_scroll.is_at_tail());
     }
 
-    /// Regression for issue #582: a resize event arriving while the
-    /// engine is in `CoherenceState::RefreshingContext` (i.e. running
-    /// a compaction summary call) must NOT leave the chat widget with
-    /// an empty viewport. The user-reported symptom on Windows
-    /// PowerShell is that the screen turns black on the maximize→
-    /// windowed transition during a long task; the post-resize render
-    /// must produce a populated frame regardless of the active
-    /// coherence intervention. Pins the invariant from the renderer
-    /// side; the actual ConHost size-stale fix lives in
-    /// `tui::ui::run_tui` (the `Event::Resize` handler now forwards
-    /// the event-reported dimensions to ratatui's viewport before the
-    /// redraw).
+    /// Regression for issue #582: a resize event during a long task must not
+    /// leave the chat widget with an empty viewport. The actual ConHost
+    /// size-stale fix lives in `tui::ui::run_tui`.
     #[test]
-    fn chat_widget_renders_cleanly_after_resize_during_refreshing_context() {
-        use crate::core::coherence::CoherenceState;
-
+    fn chat_widget_renders_cleanly_after_resize_during_long_task() {
         let mut app = create_test_app();
         for i in 0..30 {
             app.add_message(HistoryCell::User {
                 content: format!("user message {i} during a long-running task"),
             });
         }
-
-        // Pretend the engine is mid-compaction when the resize arrives.
-        app.coherence_state = CoherenceState::RefreshingContext;
 
         // Drive the same shrink-then-grow cycle that maximize→windowed
         // transitions produce on Windows.
@@ -4115,21 +4101,9 @@ mod tests {
             }
             assert!(
                 non_empty > 0,
-                "resize-during-RefreshingContext at {width}x{height} produced an empty buffer; \
-                 render path must not gate on coherence state (#582)"
+                "resize at {width}x{height} produced an empty buffer (#582)"
             );
         }
-
-        // The engine's coherence_state must survive a resize — it is
-        // the engine's runtime decision, not a render-loop concern.
-        // A future regression that bounced the state to `Healthy` on
-        // resize would silently drop the "refreshing context" footer
-        // chip while compaction is still in flight.
-        assert_eq!(
-            app.coherence_state,
-            CoherenceState::RefreshingContext,
-            "resize must not mutate engine-owned coherence_state"
-        );
     }
 
     #[test]

@@ -1441,10 +1441,9 @@ pub struct ToolsConfig {
 ///
 /// Order in the user's `Vec<StatusItem>` is preserved: items in the left
 /// cluster (`Mode`, `Model`, `Cost`, `Status`) render in the order given;
-/// right-cluster chips (`Coherence`, `Agents`, `ReasoningReplay`,
-/// `PrefixStability`, `Cache`, `ContextPercent`, `GitBranch`,
-/// `LastToolElapsed`, `RateLimit`) likewise honour ordering inside their
-/// cluster. The split between left and right is deliberate — left holds steady
+/// right-cluster chips (`Agents`, `ReasoningReplay`, `PrefixStability`,
+/// `Cache`, `ContextPercent`, `GitBranch`, `LastToolElapsed`, `RateLimit`)
+/// likewise honour ordering inside their cluster. The split between left and right is deliberate — left holds steady
 /// identity (mode/model/cost), right holds transient signals — so we route
 /// each variant to the correct side rather than letting users reorder across
 /// the spacer.
@@ -1464,8 +1463,6 @@ pub enum StatusItem {
     Cost,
     /// Activity label: "idle" / "busy" / "draft" / "working".
     Status,
-    /// Coherence intervention label: "refreshing context" / "verifying" / "resetting plan".
-    Coherence,
     /// Sub-agent count chip ("3 agents").
     Agents,
     /// Reasoning-replay token count ("rsn 12.3k").
@@ -1500,7 +1497,6 @@ impl StatusItem {
             StatusItem::Model,
             StatusItem::Cost,
             StatusItem::Status,
-            StatusItem::Coherence,
             StatusItem::Agents,
             StatusItem::ReasoningReplay,
             StatusItem::Cache,
@@ -1517,7 +1513,6 @@ impl StatusItem {
             StatusItem::Model => "model",
             StatusItem::Cost => "cost",
             StatusItem::Status => "status",
-            StatusItem::Coherence => "coherence",
             StatusItem::Agents => "agents",
             StatusItem::ReasoningReplay => "reasoning_replay",
             StatusItem::PrefixStability => "prefix_stability",
@@ -1541,7 +1536,6 @@ impl StatusItem {
             "model" => Some(Self::Model),
             "cost" => Some(Self::Cost),
             "status" => Some(Self::Status),
-            "coherence" => Some(Self::Coherence),
             "agents" => Some(Self::Agents),
             "reasoning_replay" => Some(Self::ReasoningReplay),
             "prefix_stability" => Some(Self::PrefixStability),
@@ -1564,7 +1558,6 @@ impl StatusItem {
             StatusItem::Model => "Model",
             StatusItem::Cost => "Session cost",
             StatusItem::Status => "Activity (idle/busy/draft/working)",
-            StatusItem::Coherence => "Coherence interventions",
             StatusItem::Agents => "Sub-agents in flight",
             StatusItem::ReasoningReplay => "Reasoning replay tokens",
             StatusItem::PrefixStability => "Prefix stability",
@@ -1587,7 +1580,6 @@ impl StatusItem {
             StatusItem::Model => "the model id you'll send to",
             StatusItem::Cost => "running total for this session",
             StatusItem::Status => "what the agent is doing right now",
-            StatusItem::Coherence => "shown only when the engine intervenes",
             StatusItem::Agents => "agents or RLM work in progress",
             StatusItem::ReasoningReplay => "thinking tokens replayed each turn",
             StatusItem::PrefixStability => "whether system/tools stayed cacheable",
@@ -1610,7 +1602,6 @@ impl StatusItem {
             StatusItem::Cost,
             StatusItem::Balance,
             StatusItem::Status,
-            StatusItem::Coherence,
             StatusItem::Agents,
             StatusItem::ReasoningReplay,
             StatusItem::PrefixStability,
@@ -1658,26 +1649,6 @@ pub struct RetryPolicy {
     pub initial_delay: f64,
     pub max_delay: f64,
     pub exponential_base: f64,
-}
-
-/// Capacity-controller config loaded from config files/environment.
-#[derive(Debug, Clone, Deserialize)]
-pub struct CapacityConfig {
-    pub enabled: Option<bool>,
-    pub low_risk_max: Option<f64>,
-    pub medium_risk_max: Option<f64>,
-    pub severe_min_slack: Option<f64>,
-    pub severe_violation_ratio: Option<f64>,
-    pub refresh_cooldown_turns: Option<u64>,
-    pub replan_cooldown_turns: Option<u64>,
-    pub max_replay_per_turn: Option<usize>,
-    pub min_turns_before_guardrail: Option<u64>,
-    pub profile_window: Option<usize>,
-    pub deepseek_v3_2_chat_prior: Option<f64>,
-    pub deepseek_v3_2_reasoner_prior: Option<f64>,
-    pub deepseek_v4_pro_prior: Option<f64>,
-    pub deepseek_v4_flash_prior: Option<f64>,
-    pub fallback_default_prior: Option<f64>,
 }
 
 impl RetryPolicy {
@@ -1887,7 +1858,6 @@ pub struct Config {
     #[serde(alias = "maxSubagents")]
     pub max_subagents: Option<usize>,
     pub retry: Option<RetryConfig>,
-    pub capacity: Option<CapacityConfig>,
     pub features: Option<FeaturesToml>,
 
     /// TUI configuration (alternate screen, etc.)
@@ -2510,36 +2480,6 @@ impl Config {
             if !matches!(mode.as_str(), "auto" | "always" | "never") {
                 anyhow::bail!(
                     "Invalid tui.alternate_screen '{mode}': expected auto, always, or never."
-                );
-            }
-        }
-        if let Some(capacity) = &self.capacity {
-            if let Some(v) = capacity.low_risk_max
-                && !(0.0..=1.0).contains(&v)
-            {
-                anyhow::bail!(
-                    "Invalid capacity.low_risk_max '{v}': expected a value in [0.0, 1.0]."
-                );
-            }
-            if let Some(v) = capacity.medium_risk_max
-                && !(0.0..=1.0).contains(&v)
-            {
-                anyhow::bail!(
-                    "Invalid capacity.medium_risk_max '{v}': expected a value in [0.0, 1.0]."
-                );
-            }
-            if let (Some(low), Some(medium)) = (capacity.low_risk_max, capacity.medium_risk_max)
-                && low > medium
-            {
-                anyhow::bail!(
-                    "Invalid capacity thresholds: low_risk_max ({low}) must be <= medium_risk_max ({medium})."
-                );
-            }
-            if let Some(v) = capacity.severe_violation_ratio
-                && !(0.0..=1.0).contains(&v)
-            {
-                anyhow::bail!(
-                    "Invalid capacity.severe_violation_ratio '{v}': expected a value in [0.0, 1.0]."
                 );
             }
         }
@@ -4517,119 +4457,6 @@ fn apply_env_overrides(config: &mut Config) {
     {
         config.max_subagents = Some(parsed.clamp(1, MAX_SUBAGENTS));
     }
-
-    let capacity = config.capacity.get_or_insert(CapacityConfig {
-        enabled: None,
-        low_risk_max: None,
-        medium_risk_max: None,
-        severe_min_slack: None,
-        severe_violation_ratio: None,
-        refresh_cooldown_turns: None,
-        replan_cooldown_turns: None,
-        max_replay_per_turn: None,
-        min_turns_before_guardrail: None,
-        profile_window: None,
-        deepseek_v3_2_chat_prior: None,
-        deepseek_v3_2_reasoner_prior: None,
-        deepseek_v4_pro_prior: None,
-        deepseek_v4_flash_prior: None,
-        fallback_default_prior: None,
-    });
-
-    if let Ok(value) = std::env::var("DEEPSEEK_CAPACITY_ENABLED") {
-        let val = value.trim().to_ascii_lowercase();
-        capacity.enabled = Some(matches!(val.as_str(), "1" | "true" | "yes" | "on"));
-    }
-    if let Ok(value) = std::env::var("DEEPSEEK_CAPACITY_LOW_RISK_MAX")
-        && let Ok(parsed) = value.parse::<f64>()
-    {
-        capacity.low_risk_max = Some(parsed);
-    }
-    if let Ok(value) = std::env::var("DEEPSEEK_CAPACITY_MEDIUM_RISK_MAX")
-        && let Ok(parsed) = value.parse::<f64>()
-    {
-        capacity.medium_risk_max = Some(parsed);
-    }
-    if let Ok(value) = std::env::var("DEEPSEEK_CAPACITY_SEVERE_MIN_SLACK")
-        && let Ok(parsed) = value.parse::<f64>()
-    {
-        capacity.severe_min_slack = Some(parsed);
-    }
-    if let Ok(value) = std::env::var("DEEPSEEK_CAPACITY_SEVERE_VIOLATION_RATIO")
-        && let Ok(parsed) = value.parse::<f64>()
-    {
-        capacity.severe_violation_ratio = Some(parsed);
-    }
-    if let Ok(value) = std::env::var("DEEPSEEK_CAPACITY_REFRESH_COOLDOWN_TURNS")
-        && let Ok(parsed) = value.parse::<u64>()
-    {
-        capacity.refresh_cooldown_turns = Some(parsed);
-    }
-    if let Ok(value) = std::env::var("DEEPSEEK_CAPACITY_REPLAN_COOLDOWN_TURNS")
-        && let Ok(parsed) = value.parse::<u64>()
-    {
-        capacity.replan_cooldown_turns = Some(parsed);
-    }
-    if let Ok(value) = std::env::var("DEEPSEEK_CAPACITY_MAX_REPLAY_PER_TURN")
-        && let Ok(parsed) = value.parse::<usize>()
-    {
-        capacity.max_replay_per_turn = Some(parsed);
-    }
-    if let Ok(value) = std::env::var("DEEPSEEK_CAPACITY_MIN_TURNS_BEFORE_GUARDRAIL")
-        && let Ok(parsed) = value.parse::<u64>()
-    {
-        capacity.min_turns_before_guardrail = Some(parsed);
-    }
-    if let Ok(value) = std::env::var("DEEPSEEK_CAPACITY_PROFILE_WINDOW")
-        && let Ok(parsed) = value.parse::<usize>()
-    {
-        capacity.profile_window = Some(parsed);
-    }
-    if let Ok(value) = std::env::var("DEEPSEEK_CAPACITY_PRIOR_CHAT")
-        && let Ok(parsed) = value.parse::<f64>()
-    {
-        capacity.deepseek_v3_2_chat_prior = Some(parsed);
-    }
-    if let Ok(value) = std::env::var("DEEPSEEK_CAPACITY_PRIOR_REASONER")
-        && let Ok(parsed) = value.parse::<f64>()
-    {
-        capacity.deepseek_v3_2_reasoner_prior = Some(parsed);
-    }
-    if let Ok(value) = std::env::var("DEEPSEEK_CAPACITY_PRIOR_V4_PRO")
-        && let Ok(parsed) = value.parse::<f64>()
-    {
-        capacity.deepseek_v4_pro_prior = Some(parsed);
-    }
-    if let Ok(value) = std::env::var("DEEPSEEK_CAPACITY_PRIOR_V4_FLASH")
-        && let Ok(parsed) = value.parse::<f64>()
-    {
-        capacity.deepseek_v4_flash_prior = Some(parsed);
-    }
-    if let Ok(value) = std::env::var("DEEPSEEK_CAPACITY_PRIOR_FALLBACK")
-        && let Ok(parsed) = value.parse::<f64>()
-    {
-        capacity.fallback_default_prior = Some(parsed);
-    }
-
-    if config.capacity.as_ref().is_some_and(|c| {
-        c.enabled.is_none()
-            && c.low_risk_max.is_none()
-            && c.medium_risk_max.is_none()
-            && c.severe_min_slack.is_none()
-            && c.severe_violation_ratio.is_none()
-            && c.refresh_cooldown_turns.is_none()
-            && c.replan_cooldown_turns.is_none()
-            && c.max_replay_per_turn.is_none()
-            && c.min_turns_before_guardrail.is_none()
-            && c.profile_window.is_none()
-            && c.deepseek_v3_2_chat_prior.is_none()
-            && c.deepseek_v3_2_reasoner_prior.is_none()
-            && c.deepseek_v4_pro_prior.is_none()
-            && c.deepseek_v4_flash_prior.is_none()
-            && c.fallback_default_prior.is_none()
-    }) {
-        config.capacity = None;
-    }
 }
 
 fn normalize_model_config(config: &mut Config) {
@@ -5130,7 +4957,6 @@ fn merge_config(base: Config, override_cfg: Config) -> Config {
         requirements_path: override_cfg.requirements_path.or(base.requirements_path),
         max_subagents: override_cfg.max_subagents.or(base.max_subagents),
         retry: override_cfg.retry.or(base.retry),
-        capacity: override_cfg.capacity.or(base.capacity),
         tui: override_cfg.tui.or(base.tui),
         hooks: override_cfg.hooks.or(base.hooks),
         providers: merge_providers(base.providers, override_cfg.providers),

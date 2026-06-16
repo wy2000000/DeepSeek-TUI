@@ -425,7 +425,6 @@ pub enum AgentType {
     Review,
     Implementer,
     Verifier,
-    ToolAgent,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

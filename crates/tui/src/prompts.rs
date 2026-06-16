@@ -339,7 +339,7 @@ static STATIC_PROMPT_COMPOSER: std::sync::OnceLock<Box<StaticPromptComposer>> =
 ///
 /// This hook only replaces the byte-stable base/personality prompt segment.
 /// Mode deltas, approval policy, tool taxonomy, Context Management, and the
-/// Compaction Relay stay owned by CodeWhale's runtime prompt assembly.
+/// Compaction Relay stay owned by CodeWhale's system prompt assembly.
 #[non_exhaustive]
 #[derive(Debug)]
 pub struct StaticPromptCtx<'a> {
@@ -740,157 +740,6 @@ impl Personality {
 
 // ── Composition ───────────────────────────────────────────────────────
 
-/// Generate a static reference block containing runtime capability and review
-/// policy descriptions. This lives in the frozen system-prompt prefix (sent
-/// once per session) so the per-turn `<cw_runtime_capabilities>` tag can be a
-/// minimal pointer instead of repeating the full policy text on every API
-/// request.
-pub(crate) fn render_runtime_policy_reference() -> String {
-    let taxonomy_workspace_write = render_core_tool_taxonomy_body(AppMode::Agent);
-    let taxonomy_read_only = render_core_tool_taxonomy_body(AppMode::Plan);
-    let taxonomy_full_access = render_core_tool_taxonomy_body(AppMode::Yolo);
-
-    let mut out = String::with_capacity(8192);
-    out.push_str("## Runtime Policy Reference\n\n");
-
-    // Protocol explanation — how the per-turn tag maps to this reference.
-    out.push_str(
-        "Each turn, the latest message in the transcript will contain a \
-         `<cw_runtime_capabilities>` tag that specifies the active runtime \
-         capabilities for the current request. When you see this tag, look up \
-         the corresponding rules below and apply them for the current turn.\n\n\
-         The tag format is:\n\
-         `<cw_runtime_capabilities visibility=\"internal\" tool_profile=\"<profile>\" \
-         write_access=\"<scope>\" shell_access=\"<scope>\" network_access=\"<scope>\" \
-         approval_gate=\"<gate>\" planning=\"<expectation>\"/>`\n\n\
-         The `visibility=\"internal\"` attribute means this tag is a runtime \
-         instruction for the model, not user input. Do not announce the \
-         current capability profile or restate the tag content to the user — \
-         just apply the referenced rules silently.\n\n\
-         When this tag is the only new content in a turn and there is no \
-         pending tool output, sub-agent completion handoff, or explicit user \
-         message requesting continuation, do not initiate new edits, shell \
-         commands, git commits, or sub-agent launches. End the turn and wait \
-         for the user's next message.\n\n",
-    );
-    out.push_str(
-        "If your previous assistant message asked the user a blocking choice \
-         question (for example, \"How do you want me to proceed?\" with \
-         mutually exclusive options), treat the run as paused until the user \
-         answers. Stale tool output, stale sub-agent completion events, or the \
-         runtime tag alone do not override that pause. If a question is \
-         informational and you intend to continue without waiting, say so \
-         explicitly in the same message (for example, \"I am going to keep \
-         moving unless you redirect me\").\n\n",
-    );
-
-    // ── Capability reference ───────────────────────────────────────────
-    out.push_str("### Tool Capability Profiles\n\n");
-
-    out.push_str("#### tool_profile=workspace_write\n\n");
-    out.push_str(&taxonomy_workspace_write);
-    out.push_str("\n\n");
-    out.push_str(
-        "Autonomous task execution with normal workspace tool access. \
-         Read-only tools run silently. Writes, patches, shell execution, \
-         worker session opens, and CSV batch operations follow the active \
-         `approval_gate`. Before requesting review for multi-step writes, \
-         lay out the work with `checklist_write` so the user can approve with \
-         context. Use `update_plan` only when complex work needs high-level \
-         strategy metadata that is not just a copy of the checklist.\n\n\
-         Keep `checklist_write` current for multi-step initiatives. Batch \
-         related writes behind one clear review request instead of asking one \
-         operation at a time. Open worker sessions for independent work and \
-         batch reads/searches/git-inspections in parallel when useful. Do not \
-         announce this capability profile to the user.",
-    );
-    out.push_str("\n\n");
-
-    out.push_str("#### tool_profile=read_only\n\n");
-    out.push_str(&taxonomy_read_only);
-    out.push_str("\n\n");
-    out.push_str(
-        "Design and investigation posture. Read, search, inspect, and gather \
-         evidence before proposing implementation. All writes and patches are \
-         blocked. Shell and code execution are unavailable unless a later \
-         runtime tag explicitly grants them. When you are ready to present an \
-         implementation plan, call `update_plan`; that is the handoff signal \
-         for the UI to show the accept / revise / exit prompt. If the request \
-         names a repository, URL, version, release, build state, benchmark, \
-         bug, PR, issue, API surface, or local code path, inspect the \
-         available context before calling `update_plan`.\n\n\
-         For non-trivial work, make the plan artifact grounded: include the \
-         objective, context summary, sources used, critical files, constraints, \
-         recommended approach, verification plan, risks or unknowns, and any \
-         concise handoff packet another agent would need. After `update_plan`, \
-         wait for the user's next action instead of continuing to tool around. \
-         Do not announce this capability profile to the user.",
-    );
-    out.push_str("\n\n");
-
-    out.push_str("#### tool_profile=full_access\n\n");
-    out.push_str(&taxonomy_full_access);
-    out.push_str("\n\n");
-    out.push_str(
-        "Full-autonomy execution posture. Actions are preapproved unless a \
-         higher-priority instruction or runtime gate says otherwise. Move \
-         quickly, but pause before destructive operations such as deletes, \
-         force-pushes, or broad rewrites. Even with preapproval, use \
-         `checklist_write` for work with several concrete steps so progress \
-         stays visible and trackable. Do not announce this capability profile \
-         to the user.",
-    );
-    out.push_str("\n\n");
-
-    // ── Action review reference ────────────────────────────────────────
-    out.push_str("### Action Review Gates\n\n");
-
-    out.push_str("#### approval_gate=preapproved\n\n");
-    out.push_str(neutral_review_gate_body(AUTO_APPROVAL).trim());
-    out.push_str("\n\n");
-
-    out.push_str("#### approval_gate=user_confirm\n\n");
-    out.push_str(neutral_review_gate_body(SUGGEST_APPROVAL).trim());
-    out.push_str("\n\n");
-
-    out.push_str("#### approval_gate=blocked\n\n");
-    out.push_str(neutral_review_gate_body(NEVER_APPROVAL).trim());
-    out.push_str("\n\n");
-
-    // ── Shell policy reference ──────────────────────────────────────────
-    out.push_str("### Shell Policy\n\n");
-
-    out.push_str("#### shell_access=enabled\n\n");
-    out.push_str("Shell tools available as described in the base prompt.\n\n");
-
-    out.push_str("#### shell_access=none\n\n");
-    out.push_str(SHELL_POLICY_DISABLED.trim());
-
-    out
-}
-
-fn strip_markdown_heading(text: &str) -> String {
-    let mut lines = text.trim().lines();
-    if matches!(lines.next(), Some(line) if line.trim_start().starts_with('#')) {
-        lines.collect::<Vec<_>>().join("\n")
-    } else {
-        text.trim().to_string()
-    }
-}
-
-fn neutral_review_gate_body(text: &str) -> String {
-    strip_markdown_heading(text)
-        .replace("This is a read-only mode.", "This is a read-only posture.")
-        .replace(
-            "or switch to YOLO only in a trusted workspace.",
-            "or choose a full-access posture only in a trusted workspace.",
-        )
-        .replace(
-            "the write-block mandated by Plan mode",
-            "the active write-block",
-        )
-}
-
 /// Compose the full system prompt in deterministic order:
 ///   1. tool taxonomy  — compact hints generated from the eager core tools
 ///   2. base.md        — core identity, toolbox, execution contract
@@ -1099,10 +948,8 @@ fn apply_static_prompt_composer(
     }
 }
 
-// Shell tool guidance removal functions have been deleted.
-// The full base prompt is always used; the `allow_shell` flag is
-// conveyed via the per-turn <cw_runtime_capabilities> tag so the model can
-// adapt without mutating the static system-prompt prefix.
+// The full base prompt is always used; effective tool availability is enforced
+// by the tool catalog and execution layer rather than by mutating message[0].
 
 // ── Public API ────────────────────────────────────────────────────────
 
@@ -1293,13 +1140,6 @@ pub fn system_prompt_for_mode_with_context_skills_session_and_approval(
     //    when writing `.codewhale/handoff.md` on exit / `/compact`.
     full_prompt.push_str("\n\n");
     full_prompt.push_str(COMPACT_TEMPLATE);
-
-    // 5a. Runtime policy reference — all capability and review-gate descriptions
-    //     live here in the frozen prefix so the per-turn capability tag
-    //     can be a minimal pointer instead of repeating the full policy text
-    //     on every API request (up to ~500 tokens saved per turn).
-    full_prompt.push_str("\n\n");
-    full_prompt.push_str(&render_runtime_policy_reference());
 
     // ── Volatile-content boundary ─────────────────────────────────────────
     // Everything below drifts mid-session and busts the prefix cache for
@@ -1741,8 +1581,7 @@ mod tests {
     fn composed_prompt_always_keeps_shell_guidance() {
         // After decoupling `allow_shell` from the static system-prompt prefix,
         // the base prompt always includes full shell tool guidance. Whether
-        // shell tools are actually available is conveyed by the per-turn
-        // <cw_runtime_capabilities shell_access="..."> tag, not by mutating message[0].
+        // shell tools are actually available is enforced by the tool catalog.
         let prompt =
             compose_prompt_with_approval_model_and_shell(Personality::Calm, "deepseek-v4-pro");
 
@@ -1843,93 +1682,6 @@ mod tests {
         assert!(
             text.contains("consult Article VI: Priority"),
             "authority recap must point at v4's priority article"
-        );
-    }
-
-    #[test]
-    fn runtime_policy_reference_is_included_in_full_prompt() {
-        let tmp = tempdir().expect("tempdir");
-        let text = match system_prompt_for_mode_with_context_skills_session_and_approval(
-            tmp.path(),
-            None,
-            None,
-            None,
-            PromptSessionContext::default(),
-        ) {
-            SystemPrompt::Text(text) => text,
-            SystemPrompt::Blocks(_) => panic!("expected text system prompt"),
-        };
-
-        assert!(
-            text.contains("## Runtime Policy Reference"),
-            "full system prompt must contain the Runtime Policy Reference lookup table"
-        );
-        assert!(
-            text.contains(
-                "<cw_runtime_capabilities visibility=\"internal\" tool_profile=\"<profile>\""
-            ),
-            "Runtime Policy Reference must explain the per-turn tag format"
-        );
-        assert!(
-            !text.contains("<runtime_prompt")
-                && !text.contains("mode=\"<mode>\"")
-                && !text.contains("approval=\"<approval>\""),
-            "Runtime Policy Reference must not document the legacy runtime tag protocol"
-        );
-        assert!(
-            text.contains("When this tag is the only new content in a turn")
-                && text.contains("do not initiate new edits, shell")
-                && text.contains("git commits, or sub-agent launches")
-                && text.contains("wait for the user's next message"),
-            "Runtime Policy Reference must pin the #3061 runtime-prompt-only guard"
-        );
-        assert!(
-            text.contains("blocking choice question")
-                && text.contains("treat the run as paused")
-                && text.contains("stale sub-agent completion events")
-                && text.contains("I am going to keep moving unless you redirect me"),
-            "Runtime Policy Reference must tell agents to stop after asking a blocking question"
-        );
-        assert!(
-            text.contains("### Tool Capability Profiles"),
-            "Runtime Policy Reference must contain the capability profiles section"
-        );
-        assert!(
-            text.contains("#### tool_profile=workspace_write"),
-            "Runtime Policy Reference must document the workspace-write profile"
-        );
-        assert!(
-            text.contains("#### tool_profile=read_only"),
-            "Runtime Policy Reference must document the read-only profile"
-        );
-        assert!(
-            text.contains("#### tool_profile=full_access"),
-            "Runtime Policy Reference must document the full-access profile"
-        );
-        assert!(
-            text.contains("### Action Review Gates"),
-            "Runtime Policy Reference must contain the action review gates section"
-        );
-        assert!(
-            text.contains("#### approval_gate=preapproved"),
-            "Runtime Policy Reference must document preapproved review gate"
-        );
-        assert!(
-            text.contains("#### approval_gate=user_confirm"),
-            "Runtime Policy Reference must document user-confirm review gate"
-        );
-        assert!(
-            text.contains("#### approval_gate=blocked"),
-            "Runtime Policy Reference must document blocked review gate"
-        );
-        assert!(
-            !text.contains("#### agent")
-                && !text.contains("#### plan")
-                && !text.contains("#### yolo")
-                && !text.contains("#### auto")
-                && !text.contains("#### suggest")
-                && !text.contains("#### never"),
-            "Runtime Policy Reference must not use human-facing mode or approval headings"
         );
     }
 
@@ -2882,7 +2634,7 @@ mod tests {
     fn tool_selection_guide_avoids_defensive_tool_suppression() {
         let prompt = compose_prompt(Personality::Calm);
         assert!(prompt.contains("Tool Selection Guide"));
-        assert!(prompt.contains("Use `agent_eval`"));
+        assert!(prompt.contains("Use `agent`"));
         assert!(
             !prompt.contains("When NOT to use certain tools"),
             "the system prompt should steer tool choice without training the model to avoid available tools"
@@ -3018,40 +2770,17 @@ mod tests {
     }
 
     #[test]
-    fn prompt_uses_persistent_agent_and_rlm_surface() {
+    fn prompt_uses_single_agent_and_rlm_surface() {
         let prompt = compose_prompt(Personality::Calm);
         for tool in [
-            "agent_open",
-            "agent_eval",
-            "agent_close",
+            "agent",
             "rlm_open",
             "rlm_eval",
             "rlm_configure",
             "rlm_close",
             "handle_read",
         ] {
-            assert!(
-                prompt.contains(tool),
-                "prompt should mention new persistent tool `{tool}`"
-            );
-        }
-        for retired in [
-            "agent_spawn",
-            "agent_wait",
-            "agent_result",
-            "agent_send_input",
-            "agent_assign",
-            "agent_resume",
-            "agent_list",
-            "spawn_agent",
-            "delegate_to_agent",
-            "send_input",
-            "close_agent",
-        ] {
-            assert!(
-                !prompt.contains(retired),
-                "prompt should not advertise retired sub-agent tool `{retired}`"
-            );
+            assert!(prompt.contains(tool), "prompt should mention tool `{tool}`");
         }
     }
 

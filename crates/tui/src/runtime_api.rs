@@ -3547,26 +3547,8 @@ mod tests {
             Arc::new(MockExecutor),
         )
         .await?;
-        let mut config = Config::default();
-        config.capacity = Some(crate::config::CapacityConfig {
-            enabled: Some(false),
-            low_risk_max: None,
-            medium_risk_max: None,
-            severe_min_slack: None,
-            severe_violation_ratio: None,
-            refresh_cooldown_turns: None,
-            replan_cooldown_turns: None,
-            max_replay_per_turn: None,
-            min_turns_before_guardrail: None,
-            profile_window: None,
-            deepseek_v3_2_chat_prior: None,
-            deepseek_v3_2_reasoner_prior: None,
-            deepseek_v4_pro_prior: None,
-            deepseek_v4_flash_prior: None,
-            fallback_default_prior: None,
-        });
         let runtime_threads: SharedRuntimeThreadManager = Arc::new(RuntimeThreadManager::open(
-            config,
+            Config::default(),
             workspace.clone(),
             RuntimeThreadManagerConfig::from_task_data_dir(root.join("runtime")),
         )?);
@@ -4246,7 +4228,7 @@ mod tests {
             actor_kind: "subagent".to_string(),
             parent_run_id: Some("parent_run".to_string()),
             follow_up: AgentRunFollowUpTarget {
-                tool: "agent_eval".to_string(),
+                tool: "handle_read".to_string(),
                 agent_id: "agent_receipt".to_string(),
                 session_name: Some("receipt_lane".to_string()),
                 accepted_statuses: vec![
@@ -4260,7 +4242,8 @@ mod tests {
                 supported: true,
                 agent_id: "agent_receipt".to_string(),
                 session_name: Some("receipt_lane".to_string()),
-                instructions: "Use agent_eval with agent_id 'agent_receipt'.".to_string(),
+                instructions: "Use handle_read on the transcript_handle for agent_receipt."
+                    .to_string(),
                 unsupported_reason: None,
             },
             artifacts: vec![AgentRunArtifactRef {
@@ -4335,7 +4318,7 @@ mod tests {
             .json()
             .await?;
         assert_eq!(runs["runs"][0]["spec"]["run_id"], "run_receipt");
-        assert_eq!(runs["runs"][0]["follow_up"]["tool"], "agent_eval");
+        assert_eq!(runs["runs"][0]["follow_up"]["tool"], "handle_read");
         assert_eq!(
             runs["runs"][0]["verification"]["status"],
             "self_report_only"

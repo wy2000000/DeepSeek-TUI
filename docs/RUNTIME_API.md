@@ -437,7 +437,7 @@ tokens but `0.0` cost. Added in v0.8.10 (#564).
 The runtime uses a durable Thread/Turn/Item lifecycle.
 
 - **ThreadRecord** — `id`, `created_at`, `updated_at`, `model`, `workspace`,
-  `mode`, `task_id`, `coherence_state`, `system_prompt`, `latest_turn_id`,
+  `mode`, `task_id`, `system_prompt`, `latest_turn_id`,
   `latest_response_bookmark`, `archived`
 - **TurnRecord** — `id`, `thread_id`, `status` (`queued|in_progress|completed|
   failed|interrupted|canceled`), timestamps, duration, usage, error summary
@@ -501,7 +501,7 @@ Common event names: `thread.started`, `thread.forked`, `turn.started`,
 `turn.lifecycle`, `turn.steered`, `turn.interrupt_requested`,
 `turn.completed`, `item.started`, `item.delta`, `item.completed`,
 `item.failed`, `item.interrupted`, `approval.required`, `approval.decided`,
-`approval.timeout`, `sandbox.denied`, `coherence.state`.
+`approval.timeout`, `sandbox.denied`.
 
 `approval.required` events may include a `matched_rule` string when an
 execution-policy rule caused the prompt. This field is explanatory metadata for
@@ -602,16 +602,15 @@ a read-only inspection surface:
 | List persisted agent runs | `GET /v1/agent-runs` |
 | Inspect one run | `GET /v1/agent-runs/{run_id}` |
 
-The response is the same worker-record shape returned by `agent_eval`:
+The response is the same worker-record shape surfaced by `agent` receipts:
 `spec.run_id`, `actor_kind`, lifecycle `status`, bounded `events`,
 `follow_up`, `takeover`, `artifacts`, `usage`, and `verification`. `run_id`
 falls back to the worker id for older records, and `{run_id}` may be either the
 run id or the worker id.
 
-These endpoints do not start, cancel, or steer sub-agents. Live follow-up still
-goes through `agent_eval`; live cancellation still goes through `agent_close`.
-The API surface exists so app/editor/headless clients can inspect the same
-handoff receipts that the TUI and parent model see.
+These endpoints do not start, cancel, or steer sub-agents. The API surface
+exists so app/editor/headless clients can inspect the same handoff receipts that
+the TUI and parent model see.
 
 ## Session lifecycle (native UI supervision)
 

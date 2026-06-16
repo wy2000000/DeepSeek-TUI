@@ -73,7 +73,7 @@ pub fn tool_family_for_title(title: &str) -> ToolFamily {
 }
 
 /// Map an arbitrary tool name (as exposed to the model — e.g. `read_file`,
-/// `apply_patch`, `agent_open`) to a family. Used by `GenericToolCell`
+/// `apply_patch`, `agent`) to a family. Used by `GenericToolCell`
 /// where the `tool_family_for_title` shortcut isn't enough because every
 /// generic cell shares the title `"Tool"`.
 #[must_use]
@@ -88,9 +88,7 @@ pub fn tool_family_for_name(name: &str) -> ToolFamily {
         | "task_shell_start"
         | "task_shell_wait" => ToolFamily::Run,
         "grep_files" | "file_search" | "web_search" | "fetch_url" => ToolFamily::Find,
-        "agent_open" | "agent_eval" | "agent_close" | "agent_spawn" | "tool_agent" => {
-            ToolFamily::Delegate
-        }
+        "agent" => ToolFamily::Delegate,
         "rlm_open" | "rlm_eval" | "rlm_configure" | "rlm_close" | "rlm" => ToolFamily::Rlm,
         "run_tests" | "run_verifiers" | "task_gate_run" | "validate_data" => ToolFamily::Verify,
         _ => ToolFamily::Generic,
@@ -276,7 +274,7 @@ mod tests {
         assert_eq!(tool_family_for_name("exec_shell"), ToolFamily::Run);
         assert_eq!(tool_family_for_name("task_shell_start"), ToolFamily::Run);
         assert_eq!(tool_family_for_name("grep_files"), ToolFamily::Find);
-        assert_eq!(tool_family_for_name("agent_open"), ToolFamily::Delegate);
+        assert_eq!(tool_family_for_name("agent"), ToolFamily::Delegate);
         assert_eq!(tool_family_for_name("rlm_eval"), ToolFamily::Rlm);
         assert_eq!(tool_family_for_name("run_verifiers"), ToolFamily::Verify);
         assert_eq!(

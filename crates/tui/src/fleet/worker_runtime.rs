@@ -7,7 +7,7 @@
 //! Architecture:
 //! - `FleetTaskSpec` + `FleetWorkerSpec` → `AgentWorkerSpec`
 //! - `SubAgentManager::register_worker()` tracks the worker
-//! - Sub-agent spawn happens through the existing `agent_open` machinery
+//! - Sub-agent spawn happens through the existing `agent` machinery
 //! - Mailbox events stream into fleet ledger as `FleetWorkerEventPayload`
 //! - `FleetWorkerInspection` reads both ledger state and sub-agent worker records
 
@@ -128,7 +128,8 @@ pub(crate) fn fleet_task_prompt(task_spec: &FleetTaskSpec) -> String {
 /// Map a fleet role name to a `SubAgentType`. Unknown roles default to `General`.
 fn fleet_role_to_agent_type(role: Option<&str>) -> SubAgentType {
     match role {
-        Some("smoke-runner") | Some("read-only") => SubAgentType::ToolAgent,
+        Some("smoke-runner") => SubAgentType::Verifier,
+        Some("read-only") => SubAgentType::Explore,
         Some("reviewer") => SubAgentType::Review,
         Some("builder") => SubAgentType::Implementer,
         Some("verifier") | Some("tester") => SubAgentType::Verifier,
@@ -320,10 +321,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fleet_role_smoke_runner_maps_to_tool_agent() {
+    fn fleet_role_smoke_runner_maps_to_verifier() {
         assert_eq!(
             fleet_role_to_agent_type(Some("smoke-runner")),
-            SubAgentType::ToolAgent
+            SubAgentType::Verifier
+        );
+    }
+
+    #[test]
+    fn fleet_role_read_only_maps_to_explore() {
+        assert_eq!(
+            fleet_role_to_agent_type(Some("read-only")),
+            SubAgentType::Explore
         );
     }
 
@@ -416,7 +425,7 @@ mod tests {
     }
 
     #[test]
-    fn fleet_worker_spec_defaults_to_shared_subagent_spawn_depth() {
+    fn fleet_worker_spec_defaults_to_shared_subagent_depth() {
         let task = FleetTaskSpec {
             id: "task-1".to_string(),
             name: "Task".to_string(),
@@ -625,7 +634,7 @@ mod tests {
         assert!(!is_parallel_safe_read_only_tool("write_file"));
         assert!(!is_parallel_safe_read_only_tool("edit_file"));
         assert!(!is_parallel_safe_read_only_tool("apply_patch"));
-        assert!(!is_parallel_safe_read_only_tool("agent_open"));
+        assert!(!is_parallel_safe_read_only_tool("agent"));
     }
 
     #[test]

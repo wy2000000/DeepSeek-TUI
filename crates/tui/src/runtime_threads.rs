@@ -27,7 +27,6 @@ use uuid::Uuid;
 
 use crate::compaction::CompactionConfig;
 use crate::config::{Config, DEFAULT_TEXT_MODEL, MAX_SUBAGENTS};
-use crate::core::coherence::CoherenceState;
 use crate::core::engine::{EngineConfig, EngineHandle, spawn_engine};
 use crate::core::events::{Event as EngineEvent, TurnOutcomeStatus};
 use crate::core::ops::Op;
@@ -148,8 +147,6 @@ pub struct ThreadRecord {
     /// additive metadata — older readers ignore it without misinterpretation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    #[serde(default)]
-    pub coherence_state: CoherenceState,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1021,7 +1018,6 @@ impl RuntimeThreadManager {
             system_prompt: req.system_prompt,
             task_id: req.task_id,
             title: None,
-            coherence_state: CoherenceState::default(),
         };
         self.store.save_thread(&thread)?;
         self.emit_event(
@@ -2106,9 +2102,6 @@ impl RuntimeThreadManager {
             interactive_launch_limit: self.config.interactive_launch_limit(),
             features: self.config.features(),
             compaction,
-            capacity: crate::core::capacity::CapacityControllerConfig::from_app_config(
-                &self.config,
-            ),
             todos: new_shared_todo_list(),
             plan_state: new_shared_plan_state(),
             goal_state: crate::tools::goal::new_shared_goal_state(),
@@ -2431,18 +2424,6 @@ impl RuntimeThreadManager {
                     )
                     .await?;
                 }
-                EngineEvent::ToolCallProgress { id, output } => {
-                    if let Some(item_id) = tool_items.get(&id) {
-                        self.emit_event(
-                            &thread_id,
-                            Some(&turn_id),
-                            Some(item_id),
-                            "item.delta",
-                            json!({ "delta": output, "kind": "tool_call" }),
-                        )
-                        .await?;
-                    }
-                }
                 EngineEvent::ToolCallComplete { id, name, result } => {
                     if let Some(item_id) = tool_items.remove(&id) {
                         let mut item = self.store.load_item(&item_id)?;
@@ -2557,126 +2538,6 @@ impl RuntimeThreadManager {
                         )
                         .await?;
                     }
-                }
-                EngineEvent::CoherenceState {
-                    state,
-                    label,
-                    description,
-                    reason,
-                } => {
-                    let mut thread = self.store.load_thread(&thread_id)?;
-                    thread.coherence_state = state;
-                    thread.updated_at = Utc::now();
-                    self.store.save_thread(&thread)?;
-                    self.emit_event(
-                        &thread_id,
-                        Some(&turn_id),
-                        None,
-                        "coherence.state",
-                        json!({
-                            "state": state,
-                            "label": label,
-                            "description": description,
-                            "reason": reason,
-                            "thread": thread,
-                        }),
-                    )
-                    .await?;
-                }
-                EngineEvent::CapacityDecision {
-                    risk_band,
-                    action,
-                    reason,
-                    ..
-                } => {
-                    let message = format!(
-                        "Capacity decision: risk={risk_band} action={action} reason={reason}"
-                    );
-                    let item = TurnItemRecord {
-                        schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
-                        id: format!("item_{}", &Uuid::new_v4().to_string()[..8]),
-                        turn_id: turn_id.clone(),
-                        kind: TurnItemKind::Status,
-                        status: TurnItemLifecycleStatus::Completed,
-                        summary: summarize_text(&message, SUMMARY_LIMIT),
-                        detail: Some(message),
-                        metadata: None,
-                        artifact_refs: Vec::new(),
-                        started_at: Some(Utc::now()),
-                        ended_at: Some(Utc::now()),
-                    };
-                    self.store.save_item(&item)?;
-                    self.attach_item_to_turn(&turn_id, &item.id)?;
-                    self.emit_event(
-                        &thread_id,
-                        Some(&turn_id),
-                        Some(&item.id),
-                        "item.completed",
-                        json!({ "item": item }),
-                    )
-                    .await?;
-                }
-                EngineEvent::CapacityIntervention {
-                    action,
-                    before_prompt_tokens,
-                    after_prompt_tokens,
-                    replay_outcome,
-                    replan_performed,
-                    ..
-                } => {
-                    let message = format!(
-                        "Capacity intervention: {action} (~{before_prompt_tokens} -> ~{after_prompt_tokens}) replay={replay_outcome:?} replan={replan_performed}"
-                    );
-                    let item = TurnItemRecord {
-                        schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
-                        id: format!("item_{}", &Uuid::new_v4().to_string()[..8]),
-                        turn_id: turn_id.clone(),
-                        kind: TurnItemKind::Status,
-                        status: TurnItemLifecycleStatus::Completed,
-                        summary: summarize_text(&message, SUMMARY_LIMIT),
-                        detail: Some(message),
-                        metadata: None,
-                        artifact_refs: Vec::new(),
-                        started_at: Some(Utc::now()),
-                        ended_at: Some(Utc::now()),
-                    };
-                    self.store.save_item(&item)?;
-                    self.attach_item_to_turn(&turn_id, &item.id)?;
-                    self.emit_event(
-                        &thread_id,
-                        Some(&turn_id),
-                        Some(&item.id),
-                        "item.completed",
-                        json!({ "item": item }),
-                    )
-                    .await?;
-                }
-                EngineEvent::CapacityMemoryPersistFailed { action, error, .. } => {
-                    let message =
-                        format!("Capacity memory persist failed: action={action} error={error}");
-                    let item = TurnItemRecord {
-                        schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
-                        id: format!("item_{}", &Uuid::new_v4().to_string()[..8]),
-                        turn_id: turn_id.clone(),
-                        kind: TurnItemKind::Status,
-                        status: TurnItemLifecycleStatus::Failed,
-                        summary: summarize_text(&message, SUMMARY_LIMIT),
-                        detail: Some(message),
-                        metadata: None,
-                        artifact_refs: Vec::new(),
-                        started_at: Some(Utc::now()),
-                        ended_at: Some(Utc::now()),
-                    };
-                    self.store.save_item(&item)?;
-                    self.attach_item_to_turn(&turn_id, &item.id)?;
-                    self.emit_event(
-                        &thread_id,
-                        Some(&turn_id),
-                        Some(&item.id),
-                        "item.failed",
-                        json!({ "item": item }),
-                    )
-                    .await?;
                 }
                 EngineEvent::AgentSpawned { id, prompt } => {
                     let message = format!(
@@ -3448,7 +3309,6 @@ mod tests {
             system_prompt: None,
             task_id: None,
             title: None,
-            coherence_state: CoherenceState::default(),
         }
     }
 
@@ -3821,14 +3681,6 @@ mod tests {
                     .send(EngineEvent::MessageComplete { index: 0 })
                     .await;
                 let _ = tx_event
-                    .send(EngineEvent::CoherenceState {
-                        state: CoherenceState::GettingCrowded,
-                        label: "getting crowded".to_string(),
-                        description: "The session is approaching context pressure.".to_string(),
-                        reason: "test capacity signal".to_string(),
-                    })
-                    .await;
-                let _ = tx_event
                     .send(EngineEvent::TurnComplete {
                         usage: Usage {
                             input_tokens: 10,
@@ -3867,10 +3719,6 @@ mod tests {
         let reopened = test_manager(runtime_dir)?;
         let detail = reopened.get_thread_detail(&thread.id).await?;
         assert_eq!(detail.thread.id, thread.id);
-        assert_eq!(
-            detail.thread.coherence_state,
-            CoherenceState::GettingCrowded
-        );
         assert_eq!(detail.turns.len(), 1);
         assert!(detail.latest_seq >= 1);
         assert!(!detail.items.is_empty());
@@ -3878,12 +3726,6 @@ mod tests {
         assert!(
             events.iter().any(|ev| ev.event == "turn.completed"),
             "expected turn.completed event after restart"
-        );
-        assert!(
-            events.iter().any(|ev| ev.event == "coherence.state"
-                && ev.payload.get("state").and_then(serde_json::Value::as_str)
-                    == Some("getting_crowded")),
-            "expected machine-readable coherence event after restart"
         );
         Ok(())
     }
@@ -3907,7 +3749,6 @@ mod tests {
             .await?;
 
         assert!(!thread.auto_approve);
-        assert_eq!(thread.coherence_state, CoherenceState::Healthy);
         Ok(())
     }
 
@@ -5434,7 +5275,6 @@ mod tests {
             system_prompt: None,
             task_id: None,
             title: None,
-            coherence_state: CoherenceState::default(),
         };
         manager.store.save_thread(&thread)?;
 

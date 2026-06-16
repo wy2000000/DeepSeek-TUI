@@ -6501,9 +6501,6 @@ async fn run_exec_agent(
         interactive_launch_limit: execution_config.interactive_launch_limit(),
         features: execution_config.features(),
         compaction,
-        capacity: crate::core::capacity::CapacityControllerConfig::from_app_config(
-            &execution_config,
-        ),
         todos: new_shared_todo_list(),
         plan_state: new_shared_plan_state(),
         goal_state: crate::tools::goal::new_shared_goal_state(),
@@ -6703,11 +6700,6 @@ async fn run_exec_agent(
                         eprintln!("tool: {name}");
                     }
                 }
-            }
-            Event::ToolCallProgress { id, output }
-                if output_format == ExecOutputFormat::Text && !json_output =>
-            {
-                eprintln!("tool {id}: {}", summarize_tool_output(&output));
             }
             Event::ToolCallComplete {
                 id, name, result, ..

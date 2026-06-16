@@ -33,8 +33,8 @@ use crate::mcp::McpPool;
 #[cfg(test)]
 use crate::models::ToolCaller;
 use crate::models::{
-    ContentBlock, ContentBlockStart, Delta, LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS, Message,
-    MessageRequest, StreamEvent, SystemPrompt, Tool, Usage,
+    ContentBlock, ContentBlockStart, Delta, Message, MessageRequest, StreamEvent, SystemPrompt,
+    Tool, Usage,
 };
 use crate::prompts;
 use crate::purge::{emit_purge_completed, emit_purge_failed, emit_purge_started, run_purge};
@@ -56,20 +56,11 @@ use crate::tui::app::AppMode;
 use crate::utils::spawn_supervised;
 use crate::working_set::WorkingSet;
 
-use super::capacity::{
-    CapacityController, CapacityControllerConfig, CapacityDecision, CapacityObservationInput,
-    CapacitySnapshot, GuardrailAction, RiskBand,
-};
-use super::capacity_memory::{
-    CanonicalState, CapacityMemoryRecord, ReplayInfo, append_capacity_record,
-    load_last_k_capacity_records, new_record_id, now_rfc3339,
-};
-use super::coherence::{CoherenceSignal, CoherenceState, next_coherence_state};
 use super::events::{Event, TurnOutcomeStatus};
 use super::ops::{Op, SessionSnapshot, USER_SHELL_TOOL_ID_PREFIX};
 use super::session::Session;
 use super::tool_parser;
-use super::turn::{TurnContext, TurnToolCall, post_turn_snapshot, pre_turn_snapshot};
+use super::turn::{TurnContext, post_turn_snapshot, pre_turn_snapshot};
 
 /// Snapshot of parent state that can be passed to forked sub-agents without
 /// rewriting the parent transcript.
@@ -287,8 +278,6 @@ pub struct EngineConfig {
     pub features: Features,
     /// Auto-compaction settings for long conversations.
     pub compaction: CompactionConfig,
-    /// Capacity-controller settings.
-    pub capacity: CapacityControllerConfig,
     /// Shared Todo list state.
     pub todos: SharedTodoList,
     /// Shared Plan state.
@@ -401,7 +390,6 @@ impl Default for EngineConfig {
             interactive_launch_limit: crate::config::DEFAULT_INTERACTIVE_LAUNCH_LIMIT,
             features: Features::with_defaults(),
             compaction: CompactionConfig::default(),
-            capacity: CapacityControllerConfig::default(),
             todos: new_shared_todo_list(),
             plan_state: new_shared_plan_state(),
             goal_state: new_shared_goal_state(),
@@ -541,11 +529,9 @@ pub struct Engine {
     /// user-facing message names a cause.
     pub(super) cancel_reason: Arc<StdMutex<Option<CancelReason>>>,
     tool_exec_lock: Arc<RwLock<()>>,
-    capacity_controller: CapacityController,
     /// Append-only layered context manager (#159). Opt-in for v0.7.5 while
     /// cache-hit behavior is audited.
     seam_manager: Option<SeamManager>,
-    coherence_state: CoherenceState,
     turn_counter: u64,
     /// Post-edit LSP diagnostics injection (#136). Populated unconditionally
     /// — when LSP is disabled in config, this is an inert manager that
@@ -583,6 +569,45 @@ pub struct Engine {
 // === Internal tool helpers ===
 
 impl Engine {
+    pub(super) async fn emit_compaction_started(
+        &mut self,
+        id: String,
+        auto: bool,
+        message: String,
+    ) {
+        let _ = self
+            .tx_event
+            .send(Event::CompactionStarted { id, auto, message })
+            .await;
+    }
+
+    pub(super) async fn emit_compaction_completed(
+        &mut self,
+        id: String,
+        auto: bool,
+        message: String,
+        messages_before: Option<usize>,
+        messages_after: Option<usize>,
+    ) {
+        let _ = self
+            .tx_event
+            .send(Event::CompactionCompleted {
+                id,
+                auto,
+                message,
+                messages_before,
+                messages_after,
+            })
+            .await;
+    }
+
+    pub(super) async fn emit_compaction_failed(&mut self, id: String, auto: bool, message: String) {
+        let _ = self
+            .tx_event
+            .send(Event::CompactionFailed { id, auto, message })
+            .await;
+    }
+
     fn reset_cancel_token(&mut self) {
         let token = CancellationToken::new();
         self.cancel_token = token.clone();
@@ -800,8 +825,6 @@ impl Engine {
             .shell_manager
             .clone()
             .unwrap_or_else(|| new_shared_shell_manager(config.workspace.clone()));
-        let capacity_controller = CapacityController::new(config.capacity.clone());
-
         // Create Flash seam manager for layered context (#159). v0.7.5 keeps
         // this opt-in until the prefix-cache audit proves when seam production
         // is worth the extra request and transcript mutation.
@@ -863,7 +886,7 @@ impl Engine {
             })
             .map(std::sync::Arc::from);
 
-        let mut engine = Engine {
+        let engine = Engine {
             config,
             api_config: api_config.clone(),
             deepseek_client,
@@ -885,9 +908,7 @@ impl Engine {
             shared_cancel_token: shared_cancel_token.clone(),
             cancel_reason: cancel_reason.clone(),
             tool_exec_lock,
-            capacity_controller,
             seam_manager,
-            coherence_state: CoherenceState::default(),
             turn_counter: 0,
             lsp_manager,
             pending_lsp_blocks: Vec::new(),
@@ -898,8 +919,6 @@ impl Engine {
             token_estimate_cache: TokenEstimateCache::new(),
             shared_paused: shared_paused.clone(),
         };
-        engine.rehydrate_latest_canonical_state();
-
         let handle = EngineHandle {
             tx_op,
             rx_event: Arc::new(RwLock::new(rx_event)),
@@ -924,7 +943,6 @@ impl Engine {
     ) {
         self.reset_cancel_token();
         self.turn_counter = self.turn_counter.saturating_add(1);
-        self.capacity_controller.mark_turn_start(self.turn_counter);
 
         let turn_id = format!(
             "{}{seq}",
@@ -1411,7 +1429,6 @@ impl Engine {
                         None
                     };
                     self.session.rebuild_working_set();
-                    self.rehydrate_latest_canonical_state();
                     self.emit_session_updated().await;
                     let _ = self
                         .tx_event
@@ -1585,20 +1602,6 @@ impl Engine {
         }
     }
 
-    fn runtime_prompt_message(&self) -> Message {
-        let mode = self.current_mode;
-        let agent_approval_mode =
-            agent_approval_mode_for_turn(self.session.auto_approve, self.session.approval_mode);
-        let approval_mode = approval_mode_for(mode, agent_approval_mode);
-        Message {
-            role: "user".to_string(),
-            content: vec![ContentBlock::Text {
-                text: runtime_prompt_text(mode, approval_mode, self.session.allow_shell),
-                cache_control: None,
-            }],
-        }
-    }
-
     fn user_text_message_with_turn_metadata(&self, text: String) -> Message {
         self.user_text_message_with_turn_metadata_for_route(
             text,
@@ -1678,7 +1681,6 @@ impl Engine {
         // Create turn context first so start event includes a stable turn id.
         let mut turn = TurnContext::new(self.config.max_steps);
         self.turn_counter = self.turn_counter.saturating_add(1);
-        self.capacity_controller.mark_turn_start(self.turn_counter);
 
         // Emit turn started event IMMEDIATELY so the UI knows the turn is
         // active. The snapshot below can take 30+ seconds on slow filesystems
@@ -1821,8 +1823,7 @@ impl Engine {
         self.config.show_thinking = show_thinking;
         self.config.verbosity = verbosity;
 
-        // Refresh stable prompt context. Current mode is carried by the
-        // request-time runtime prompt projection.
+        // Refresh stable prompt context.
         self.refresh_system_prompt();
         self.emit_session_updated().await;
 
@@ -2803,17 +2804,6 @@ fn goal_objective_for_prompt(
 // byte-stable, and strict chat-template providers never see a system message
 // outside messages[0].
 
-fn approval_mode_for(
-    mode: AppMode,
-    session_approval: crate::tui::approval::ApprovalMode,
-) -> crate::tui::approval::ApprovalMode {
-    match mode {
-        AppMode::Yolo => crate::tui::approval::ApprovalMode::Auto,
-        AppMode::Plan => crate::tui::approval::ApprovalMode::Never,
-        AppMode::Agent => session_approval,
-    }
-}
-
 fn agent_approval_mode_for_turn(
     auto_approve: bool,
     approval_mode: crate::tui::approval::ApprovalMode,
@@ -2823,50 +2813,6 @@ fn agent_approval_mode_for_turn(
     } else {
         approval_mode
     }
-}
-
-/// Produce a minimal runtime-capabilities tag for the per-turn transient user message.
-///
-/// Human UI labels such as Plan / Agent / YOLO and approval-mode names stay in
-/// the app shell. The model receives route-effective capabilities instead, so
-/// prompt behavior follows the current runtime posture without training the
-/// model on presentation labels or branding.
-fn runtime_prompt_text(
-    mode: AppMode,
-    approval_mode: crate::tui::approval::ApprovalMode,
-    allow_shell: bool,
-) -> String {
-    let tool_profile = match mode {
-        AppMode::Agent => "workspace_write",
-        AppMode::Plan => "read_only",
-        AppMode::Yolo => "full_access",
-    };
-    let write_access = match mode {
-        AppMode::Agent => "workspace",
-        AppMode::Plan => "none",
-        AppMode::Yolo => "full_disk",
-    };
-    let shell_access = if matches!(mode, AppMode::Plan) || !allow_shell {
-        "none"
-    } else {
-        "enabled"
-    };
-    let network_access = match mode {
-        AppMode::Plan => "none",
-        AppMode::Agent | AppMode::Yolo => "enabled",
-    };
-    let approval_gate = match approval_mode {
-        crate::tui::approval::ApprovalMode::Auto => "preapproved",
-        crate::tui::approval::ApprovalMode::Suggest => "user_confirm",
-        crate::tui::approval::ApprovalMode::Never => "blocked",
-    };
-    let planning = match mode {
-        AppMode::Plan => "required",
-        AppMode::Agent | AppMode::Yolo => "optional",
-    };
-    format!(
-        "<cw_runtime_capabilities visibility=\"internal\" tool_profile=\"{tool_profile}\" write_access=\"{write_access}\" shell_access=\"{shell_access}\" network_access=\"{network_access}\" approval_gate=\"{approval_gate}\" planning=\"{planning}\"/>"
-    )
 }
 
 /// Spawn the engine in a background task
@@ -2955,16 +2901,15 @@ pub(crate) fn mock_engine_handle() -> MockEngineHandle {
 }
 
 mod approval;
-mod capacity_flow;
 mod context;
 mod handle;
 pub(crate) use context::compact_tool_result_for_context;
 #[cfg(test)]
 use context::route_context_budget_for_provider;
 use context::{
-    COMPACTION_SUMMARY_MARKER, MAX_CONTEXT_RECOVERY_ATTEMPTS, MIN_RECENT_MESSAGES_TO_KEEP,
-    context_input_budget_for_provider, effective_max_output_tokens,
-    extract_compaction_summary_prompt, is_context_length_error_message, summarize_text,
+    MAX_CONTEXT_RECOVERY_ATTEMPTS, MIN_RECENT_MESSAGES_TO_KEEP, context_input_budget_for_provider,
+    effective_max_output_tokens, extract_compaction_summary_prompt,
+    is_context_length_error_message, summarize_text,
 };
 mod dispatch;
 mod loop_guard;

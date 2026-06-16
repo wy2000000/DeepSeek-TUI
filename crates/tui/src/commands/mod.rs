@@ -395,7 +395,7 @@ mod tests {
         let Some(AppAction::SendMessage(message)) = result.action else {
             panic!("expected SendMessage action");
         };
-        assert!(message.contains("agent_open"));
+        assert!(message.contains("`agent`"));
         assert!(message.contains("max_depth: 0"));
     }
 

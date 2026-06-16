@@ -8,7 +8,7 @@ Your default workflow for tasks estimated at 5+ concrete steps:
 1. **`checklist_write`** — break the work into concrete, verifiable steps. Mark the first one `in_progress`. This populates the sidebar so the user can see what you're doing.
 2. **Execute** — work through each checklist item, updating status as you go.
 3. **For complex initiatives only**, add `update_plan` as high-level strategy. Do not mirror the checklist into a second tracker.
-4. **For parallel work**, open sub-agent sessions with `agent_open` — each does one thing well. Use `agent_eval` for follow-ups or completion state, and `agent_close` to cancel or release a session. Link them to Work/checklist items in your thinking.
+4. **For parallel work**, start focused child sessions with `agent` — each does one thing well and reports completion automatically. Link them to Work/checklist items in your thinking.
 5. **Only when an input genuinely doesn't fit your context window** — a whole file > ~50K tokens, a long transcript, a multi-document corpus — use persistent RLM sessions: `rlm_open` loads the input into a named Python REPL, where the loaded source is `_context` with `_ctx` and `content` aliases. `rlm_eval` runs bounded analysis, `handle_read` reads returned `var_handle`s, `rlm_configure` adjusts feedback/depth, and `rlm_close` releases the session. For shorter inputs, use `read_file` and reason directly.
 6. **For persistent cross-session memory**, use `note` sparingly for important decisions, open blockers, and architectural context.
 
@@ -22,7 +22,7 @@ Use `explore` / `explorer` sub-agents for independent read-only reconnaissance. 
 
 ## RLM Is a Specialty Tool
 
-Persistent RLM sessions are for one specific shape of work: a long input that genuinely does not fit in your context (a whole file > ~50K tokens, a long transcript, a multi-document corpus) or a batch of many semantic sub-questions that is cleaner in Python. Reach for RLM only when direct reasoning over the input is impossible or wasteful. For everything else — short inputs, focused questions, parallel exploration — use `read_file`, `grep_files`, or `agent_open` instead.
+Persistent RLM sessions are for one specific shape of work: a long input that genuinely does not fit in your context (a whole file > ~50K tokens, a long transcript, a multi-document corpus) or a batch of many semantic sub-questions that is cleaner in Python. Reach for RLM only when direct reasoning over the input is impossible or wasteful. For everything else — short inputs, focused questions, parallel exploration — use `read_file`, `grep_files`, or `agent` instead.
 
 When you do use RLM, open a named context with `rlm_open`, run bounded code with `rlm_eval`, read large `var_handle` results with `handle_read`, and close the context with `rlm_close`. Results are advisory — ground decisions in local files, live tool output, and passing verification before claiming completion.
 
@@ -43,7 +43,7 @@ Model notes: DeepSeek V4 models emit *thinking tokens* (`ContentBlock::Thinking`
 - **Task evidence**: `task_gate_run` for verification gates; `pr_attempt_record` / `pr_attempt_list` / `pr_attempt_read` / `pr_attempt_preflight`; for GitHub issue/PR/release triage, prefer the native `gh ... --json` CLI through shell because it is authenticated, structured, and reproducible; `github_issue_context` / `github_pr_context` are read-only fallbacks when the CLI route is unavailable; `github_comment` / `github_close_issue` require approval + evidence; `automation_*` scheduling tools.
 - **Structured search**: `grep_files`, `file_search`, `web_search`, `fetch_url`, `web.run` (browse).
 - **Git / diag / tests**: `git_status`, `git_diff`, `git_show`, `git_log`, `git_blame`, `diagnostics`, `run_tests`, `run_verifiers`, `review`.
-- **Sub-agents**: `agent_open`, `agent_eval`, `agent_close`. Fresh sessions are the default; use `fork_context: true` when multiple perspectives need the current parent context and byte-identical prefill/prompt prefix for DeepSeek prefix-cache reuse. Use `tool_agent` for experimental Fin fast-lane execution: simple tool-bound OCR/search/fetch/probe work on Flash V4 with thinking off.
+- **Sub-agents**: `agent`. Fresh sessions are the default; use `fork_context: true` when multiple perspectives need the current parent context and byte-identical prefill/prompt prefix for DeepSeek prefix-cache reuse. Child results report back automatically through completion events.
 - **Recursive LM (long inputs / parallel reasoning)**: `rlm_open`, `rlm_eval`, `rlm_configure`, `rlm_close` — open a named Python REPL over a file/string/URL, run deterministic and semantic analysis, return compact results or `var_handle`s, then close when done.
 - **Large symbolic outputs**: `handle_read` — read bounded slices, counts, ranges, or JSONPath projections from returned `var_handle`s only. For `art_...`, `call_...`, SHA, or spilled tool-output refs, use `retrieve_tool_result`.
 - **Other**: `code_execution` (Python sandbox), `validate_data` (JSON/TOML), `request_user_input`, `finance` (market quotes), `tool_search_tool_regex`, `tool_search_tool_bm25` (deferred tool discovery).

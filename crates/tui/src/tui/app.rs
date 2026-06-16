@@ -18,7 +18,6 @@ use crate::config::{
     ApiProvider, Config, DEFAULT_TEXT_MODEL, SavedCredential, has_api_key, save_api_key,
 };
 use crate::config_ui::ConfigUiMode;
-use crate::core::coherence::CoherenceState;
 use crate::hooks::{HookContext, HookEvent, HookExecutor, HookResult};
 use crate::localization::{Locale, MessageId, resolve_locale, tr};
 use crate::models::{
@@ -1572,7 +1571,7 @@ pub struct App {
     /// when a fresh fanout-family tool call starts.
     pub last_fanout_card_index: Option<usize>,
     /// Most recently observed sub-agent dispatch tool name (set on
-    /// `ToolCallStarted` for `agent_spawn` / `rlm` / etc., cleared
+    /// `ToolCallStarted` for `agent` / `rlm` / etc., cleared
     /// after the first `Started` mailbox envelope routes through it).
     pub pending_subagent_dispatch: Option<String>,
     /// Animation anchor for status-strip active sub-agent spinner.
@@ -1810,8 +1809,6 @@ pub struct App {
     /// streamed chunks don't yank the view back to the live tail. Cleared
     /// when the user explicitly returns to bottom or the turn completes.
     pub user_scrolled_during_stream: bool,
-    /// Plain-language session coherence state for the footer.
-    pub coherence_state: CoherenceState,
     /// Timestamp of the last user message send (for brief visual feedback).
     pub last_send_at: Option<Instant>,
     /// Most recent user prompt accepted for an active engine turn. Ctrl+C can
@@ -2452,7 +2449,6 @@ impl App {
             is_compacting: false,
             is_purging: false,
             user_scrolled_during_stream: false,
-            coherence_state: CoherenceState::default(),
             last_send_at: None,
             last_submitted_prompt: None,
             auto_submit_initial_input,

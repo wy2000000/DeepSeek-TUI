@@ -992,7 +992,6 @@ fn build_engine_config(app: &App, config: &Config) -> EngineConfig {
         interactive_launch_limit: config.interactive_launch_limit(),
         features: config.features(),
         compaction: app.compaction_config(),
-        capacity: crate::core::capacity::CapacityControllerConfig::from_app_config(config),
         todos: app.todos.clone(),
         plan_state: app.plan_state.clone(),
         goal_state: crate::tools::goal::new_shared_goal_state_from_host_status(
@@ -1814,12 +1813,7 @@ async fn run_event_loop(
                         // (delegate vs fanout).
                         if matches!(
                             name.as_str(),
-                            "agent_open"
-                                | "agent_spawn"
-                                | "rlm_open"
-                                | "rlm_eval"
-                                | "rlm"
-                                | "delegate"
+                            "agent" | "rlm_open" | "rlm_eval" | "rlm" | "delegate"
                         ) {
                             app.pending_subagent_dispatch = Some(name.clone());
                             if matches!(name.as_str(), "rlm_open" | "rlm_eval" | "rlm") {
@@ -1865,10 +1859,7 @@ async fn run_event_loop(
                         // poll. Also merge shell jobs (#373).
                         if matches!(
                             name.as_str(),
-                            "agent_open"
-                                | "agent_spawn"
-                                | "agent_close"
-                                | "agent_cancel"
+                            "agent"
                                 | "todo_write"
                                 | "checklist_write"
                                 | "checklist_update"
@@ -1882,16 +1873,7 @@ async fn run_event_loop(
                             refresh_active_task_panel(app, &task_manager).await;
                             last_task_refresh = Instant::now();
                         }
-                        if matches!(
-                            name.as_str(),
-                            "agent_open"
-                                | "agent_eval"
-                                | "agent_close"
-                                | "agent_cancel"
-                                | "agent_wait"
-                                | "agent_result"
-                                | "agent_status"
-                        ) {
+                        if matches!(name.as_str(), "agent") {
                             let _ = engine_handle.send(Op::ListSubAgents).await;
                         }
                     }
@@ -2368,9 +2350,6 @@ async fn run_event_loop(
                         app.is_purging = false;
                         app.status_message = Some(message);
                     }
-                    EngineEvent::CoherenceState { state, .. } => {
-                        app.coherence_state = state;
-                    }
                     EngineEvent::PrefixCacheChange {
                         description,
                         stability_pct,
@@ -2388,25 +2367,6 @@ async fn run_event_loop(
                                 app.last_prefix_change_desc = Some(description);
                             }
                         }
-                    }
-                    EngineEvent::CapacityDecision { .. } => {
-                        // Telemetry-only event. Surface actual interventions and failures
-                        // instead of replacing the footer with no-op guardrail chatter.
-                    }
-                    EngineEvent::CapacityIntervention {
-                        action,
-                        before_prompt_tokens,
-                        after_prompt_tokens,
-                        ..
-                    } => {
-                        app.status_message = Some(format!(
-                            "Capacity intervention: {action} (~{before_prompt_tokens} -> ~{after_prompt_tokens} tokens)"
-                        ));
-                    }
-                    EngineEvent::CapacityMemoryPersistFailed { action, error, .. } => {
-                        app.status_message = Some(format!(
-                            "Capacity memory persist failed ({action}): {error}"
-                        ));
                     }
                     EngineEvent::PauseEvents { ack } => {
                         if !event_broker.is_paused() {
@@ -2680,10 +2640,6 @@ async fn run_event_loop(
                             "Action required: answer the popup with 1-4, arrows, or Enter"
                                 .to_string(),
                         );
-                    }
-                    EngineEvent::ToolCallProgress { id, output } => {
-                        app.status_message =
-                            Some(format!("Tool {id}: {}", summarize_tool_output(&output)));
                     }
                     EngineEvent::ElevationRequired {
                         tool_id,
@@ -3040,7 +2996,6 @@ async fn run_event_loop(
                 tracing::debug!(
                     width,
                     height,
-                    coherence = ?app.coherence_state,
                     use_alt_screen = app.use_alt_screen,
                     "Event::Resize received; clearing terminal"
                 );
@@ -5723,10 +5678,9 @@ fn paused_command_note(title: &str, resume: bool) -> String {
         "The user is not resuming that paused command. Answer only the new message and do not continue the paused command."
     };
     format!(
-        "\n\n<runtime_prompt visibility=\"internal\">\n\
-Paused custom slash command: {title}\n\
-{instruction}\n\
-</runtime_prompt>"
+        "\n\nCodeWhale paused custom slash command context:\n\
+Paused command: {title}\n\
+{instruction}"
     )
 }
 
@@ -8855,7 +8809,6 @@ fn suppress_engine_event_after_local_cancel(event: &EngineEvent) -> bool {
             | EngineEvent::ThinkingDelta { .. }
             | EngineEvent::ThinkingComplete { .. }
             | EngineEvent::ToolCallStarted { .. }
-            | EngineEvent::ToolCallProgress { .. }
             | EngineEvent::ToolCallComplete { .. }
             | EngineEvent::ApprovalRequired { .. }
             | EngineEvent::UserInputRequired { .. }
@@ -8874,7 +8827,6 @@ fn ignore_stale_stream_event_while_idle(event: &EngineEvent) -> bool {
             | EngineEvent::ThinkingDelta { .. }
             | EngineEvent::ThinkingComplete { .. }
             | EngineEvent::ToolCallStarted { .. }
-            | EngineEvent::ToolCallProgress { .. }
             | EngineEvent::ToolCallComplete { .. }
             | EngineEvent::ApprovalRequired { .. }
             | EngineEvent::UserInputRequired { .. }

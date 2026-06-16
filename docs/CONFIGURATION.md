@@ -817,8 +817,8 @@ continue_on_error = true
 ```
 
 Previews are capped before delivery so lifecycle hooks do not receive full
-sub-agent prompts, transcripts, or unbounded results. Use `agent_eval` from a
-normal model/tool flow when full sub-agent details are needed.
+sub-agent prompts, transcripts, or unbounded results. Use the transcript handle
+returned by `agent` when full sub-agent details are needed.
 
 ### Composer stash (`/stash`, Ctrl+S)
 
@@ -909,10 +909,6 @@ Readability semantics:
 
 - Selection uses a unified style across transcript, composer menus, and modals.
 - Footer hints use a dedicated semantic role (`FOOTER_HINT`) so hint text stays readable across themes.
-- The footer includes a compact `coherence` chip that describes how stable and
-  focused the current session is right now. Possible states are `healthy`,
-  `crowded`, `refreshing`, `verifying`, and `resetting`; these are derived from
-  capacity and compaction events without exposing internal formulas in normal UI.
 
 ### Token Quantities and Drivers
 
@@ -985,8 +981,8 @@ If you are upgrading from older releases:
 - `managed_config_path` (string, optional): managed config file loaded after user/env config.
 - `requirements_path` (string, optional): requirements file used to enforce allowed approval/sandbox values.
 - `max_subagents` (int, optional): defaults to `10` and is clamped to `1..=20`.
-- `subagents.*` (optional): per-role/type model defaults for `agent_open` and
-  related persistent sub-agent sessions. Explicit tool `model` values win, then role/type
+- `subagents.*` (optional): per-role/type model defaults for `agent`.
+  Explicit tool `model` values win, then role/type
   overrides, then the parent runtime model. Supported convenience keys are
   `default_model`, `worker_model`, `explorer_model`, `awaiter_model`,
   `review_model`, `custom_model`, `max_concurrent`, `api_timeout_secs`, and

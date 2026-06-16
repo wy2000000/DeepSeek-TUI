@@ -32,7 +32,7 @@ pub(super) fn running_agent_count(app: &App) -> usize {
 pub(super) fn active_fanout_counts(app: &App) -> Option<(usize, usize)> {
     // Read running count from the canonical slot states on the active
     // FanoutCard, if one exists. Used by `rlm` and any future multi-child
-    // dispatch the parent agent makes via repeated `agent_spawn`.
+    // dispatch the parent agent makes via repeated `agent`.
     if let Some(idx) = app.last_fanout_card_index
         && let Some(HistoryCell::SubAgent(SubAgentCell::Fanout(card))) = app.history.get(idx)
     {

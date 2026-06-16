@@ -54,7 +54,7 @@ pub enum MailboxMessage {
     /// A child agent was spawned by this agent.
     ChildSpawned { parent_id: String, child_id: String },
     /// Agent completed successfully (carries the summary line shown in the
-    /// transcript; full result is still available via `agent_result`).
+    /// transcript; full result is still available through the transcript handle).
     Completed { agent_id: String, summary: String },
     /// Agent failed with the carried error message.
     Failed { agent_id: String, error: String },
@@ -160,7 +160,7 @@ impl Mailbox {
     /// Create a new mailbox bound to the given cancellation token. Closing
     /// the mailbox (or dropping the last sender) cancels this token. Runtimes
     /// that derive from the same token observe that cancellation; detached
-    /// background `agent_open` sessions use their own runtime token.
+    /// background `agent` sessions use their own runtime token.
     #[must_use]
     pub fn new(cancel_token: CancellationToken) -> (Self, MailboxReceiver) {
         let (tx, rx) = mpsc::unbounded_channel();
@@ -219,7 +219,7 @@ impl Mailbox {
     /// "Close-as-cancel": there's no useful state where the consumer is gone
     /// but producers bound to this mailbox token should keep publishing.
     /// Closing cancels the bound token; directly derived `child_runtime()`
-    /// children observe it, while detached `agent_open` sessions rely on their
+    /// children observe it, while detached `agent` sessions rely on their
     /// own explicit cancellation.
     pub fn close(&self) {
         if !self.inner.closed.swap(true, Ordering::AcqRel) {

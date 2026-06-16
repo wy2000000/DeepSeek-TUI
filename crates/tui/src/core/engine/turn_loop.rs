@@ -82,7 +82,6 @@ impl Engine {
         // the SAME request up to MAX_STREAM_RETRIES times before surfacing
         // the failure to the user.
         let mut stream_retry_attempts: u32 = 0;
-        let mut last_dispatched_messages_revision: Option<u64> = None;
 
         loop {
             if self.cancel_token.is_cancelled() {
@@ -205,13 +204,6 @@ impl Engine {
                 }
             }
 
-            if self
-                .run_capacity_pre_request_checkpoint(turn, Some(&client), mode)
-                .await
-            {
-                continue;
-            }
-
             if let Some(input_budget) =
                 context_input_budget_for_provider(self.api_provider, &self.session.model)
             {
@@ -250,19 +242,8 @@ impl Engine {
             // appends <archived_context> blocks rather than replacing history.
             self.layered_context_checkpoint().await;
 
-            if should_skip_runtime_prompt_only_dispatch(
-                last_dispatched_messages_revision,
-                self.session.messages_revision,
-                stream_retry_attempts,
-            ) {
-                let message = "No new user, tool, sub-agent, or continuation input since the last provider request; ending turn instead of dispatching a runtime-prompt-only request.";
-                crate::logging::warn(message);
-                let _ = self.tx_event.send(Event::status(message)).await;
-                break;
-            }
-
             // Build the request
-            let force_update_plan_this_step = force_update_plan_first && turn.tool_calls.is_empty();
+            let force_update_plan_this_step = force_update_plan_first && !turn.has_tool_calls();
             let mut active_tools = if tool_catalog.is_empty() {
                 None
             } else {
@@ -409,7 +390,6 @@ impl Engine {
             // first call) so we can resend it on a transparent retry below
             // when the wire dies before any content was streamed (#103).
             let stream_request = request;
-            last_dispatched_messages_revision = Some(self.session.messages_revision);
             let stream_result = tokio::select! {
                 biased;
                 () = self.cancel_token.cancelled() => {
@@ -432,7 +412,6 @@ impl Engine {
                             .await
                     {
                         context_recovery_attempts = context_recovery_attempts.saturating_add(1);
-                        last_dispatched_messages_revision = None;
                         continue;
                     }
                     turn_error = Some(message.clone());
@@ -1114,8 +1093,7 @@ impl Engine {
                     // Launching a sub-agent is not the same as joining it — the
                     // parent ends its turn and stays responsive. Running children
                     // are background work; their results return via the
-                    // completion sentinel on a later turn (or the model polls
-                    // with `agent_eval`). Stale children are filtered out of
+                    // completion sentinel on a later turn. Stale children are filtered out of
                     // `running_count` by the manager's heartbeat, so they neither
                     // block nor inflate the surfaced count. (Previously the parent
                     // waited in a select! loop here until a completion or the
@@ -1130,7 +1108,7 @@ impl Engine {
                         let _ = self
                             .tx_event
                             .send(Event::status(format!(
-                                "Turn ending with {running} sub-agent(s) still running in the background; they'll report when done (or use agent_eval to check)."
+                                "Turn ending with {running} sub-agent(s) still running in the background; they'll report when done."
                             )))
                             .await;
                     }
@@ -1682,7 +1660,7 @@ impl Engine {
                 // #3216 / #2211: once the turn is cancelled, do not start any
                 // further tool batches. Cancellation arrives out-of-band (the
                 // TUI cancels the shared token directly), so we can observe it
-                // here even while a long serial fan-out — e.g. six `agent_open`
+                // here even while a long serial fan-out — e.g. six `agent`
                 // calls each resolving a model route under the global tool lock
                 // — is mid-flight. Without this check the batch loop ran to
                 // completion (~6×4s) with no way to interrupt, which read as a
@@ -1764,8 +1742,7 @@ impl Engine {
                             } else {
                                 None
                             };
-                            let mut result = Engine::execute_tool_with_heartbeat(
-                                plan.id.clone(),
+                            let mut result = Engine::execute_tool_with_lock(
                                 lock,
                                 plan.supports_parallel || plan.detached_start,
                                 plan.interactive,
@@ -2121,8 +2098,7 @@ impl Engine {
                         let mut result = if let Some(result_override) = result_override {
                             result_override
                         } else {
-                            Self::execute_tool_with_heartbeat(
-                                tool_id.clone(),
+                            Self::execute_tool_with_lock(
                                 tool_exec_lock.clone(),
                                 plan.supports_parallel,
                                 plan.interactive,
@@ -2191,11 +2167,8 @@ impl Engine {
             let mut loop_guard_halt: Option<String> = None;
 
             for outcome in outcomes.into_iter().flatten() {
-                let duration = outcome.started_at.elapsed();
                 let tool_input = outcome.input.clone();
                 let tool_name_for_ws = outcome.name.clone();
-                let mut tool_call =
-                    TurnToolCall::new(outcome.id.clone(), outcome.name.clone(), outcome.input);
                 let should_stop_this_turn =
                     should_stop_after_plan_tool(mode, &outcome.name, &outcome.result);
 
@@ -2228,9 +2201,6 @@ impl Engine {
                             .and_then(|metadata| metadata.get("executed"))
                             .and_then(serde_json::Value::as_bool)
                             .unwrap_or(true);
-                        let output_content = output.content;
-
-                        tool_call.set_result(output_content.clone(), duration);
                         self.session.working_set.observe_tool_call(
                             &tool_name_for_ws,
                             &tool_input,
@@ -2291,7 +2261,6 @@ impl Engine {
                         step_error_count += 1;
                         step_error_categories.push(envelope.category);
                         let error = format_tool_error(&e, &outcome.name);
-                        tool_call.set_error(error.clone(), duration);
                         self.session.working_set.observe_tool_call(
                             &tool_name_for_ws,
                             &tool_input,
@@ -2311,7 +2280,7 @@ impl Engine {
                     }
                 }
 
-                turn.record_tool_call(tool_call);
+                turn.record_tool_call();
                 stop_after_plan_tool |= should_stop_this_turn;
             }
 
@@ -2325,21 +2294,6 @@ impl Engine {
                 // 设置 turn_error 以确保最终返回 TurnOutcomeStatus::Failed 而非 Completed
                 turn_error = Some(message);
                 break;
-            }
-
-            if self
-                .run_capacity_post_tool_checkpoint(
-                    turn,
-                    tool_registry,
-                    tool_exec_lock.clone(),
-                    mcp_pool.clone(),
-                    step_error_count,
-                    consecutive_tool_error_steps,
-                )
-                .await
-            {
-                turn.next_step();
-                continue;
             }
 
             if !pending_steers.is_empty() {
@@ -2356,19 +2310,6 @@ impl Engine {
                 consecutive_tool_error_steps = consecutive_tool_error_steps.saturating_add(1);
             } else {
                 consecutive_tool_error_steps = 0;
-            }
-
-            if self
-                .run_capacity_error_escalation_checkpoint(
-                    turn,
-                    step_error_count,
-                    consecutive_tool_error_steps,
-                    &step_error_categories,
-                )
-                .await
-            {
-                turn.next_step();
-                continue;
             }
 
             turn.next_step();
@@ -2478,15 +2419,7 @@ impl Engine {
     }
 
     pub(super) fn messages_with_turn_metadata(&self) -> Vec<Message> {
-        // Keep stored history byte-stable and provider-compatible: runtime
-        // mode/approval contracts are projected as a transient user message
-        // at request time instead of being persisted as appended system
-        // messages. This preserves the stable prefix through all stored
-        // messages while avoiding strict chat templates that only allow
-        // system messages at messages[0].
-        let mut messages: Vec<Message> = self.session.messages.clone().into();
-        messages.push(self.runtime_prompt_message());
-        messages
+        self.session.messages.clone().into()
     }
 }
 
@@ -2577,20 +2510,11 @@ fn should_hold_turn_for_subagents(queued_completions: usize, running_children: u
     // completions (work already finished that must be surfaced into the
     // transcript) hold the turn open. Running children are background work — the
     // parent ends its turn and their results arrive via the completion sentinel
-    // on a later turn, or the model polls them with `agent_eval`. The
+    // on a later turn. The
     // `running_children` argument is kept for call-site clarity and the
     // background-status message, but deliberately no longer gates the hold.
     let _ = running_children;
     queued_completions > 0
-}
-
-fn should_skip_runtime_prompt_only_dispatch(
-    last_dispatched_messages_revision: Option<u64>,
-    current_messages_revision: u64,
-    stream_retry_attempts: u32,
-) -> bool {
-    last_dispatched_messages_revision == Some(current_messages_revision)
-        && stream_retry_attempts == 0
 }
 
 fn stream_chunk_timeout_budget(config: &EngineConfig) -> (u64, Duration) {
@@ -2901,19 +2825,11 @@ mod tests {
         assert!(should_hold_turn_for_subagents(1, 0));
         // ...but running children no longer barrier the parent — launching a
         // sub-agent is not the same as joining it (results arrive via the
-        // completion sentinel / agent_eval).
+        // completion sentinel).
         assert!(!should_hold_turn_for_subagents(0, 1));
         assert!(!should_hold_turn_for_subagents(0, 0));
         // Queued completions hold regardless of how many children are running.
         assert!(should_hold_turn_for_subagents(2, 5));
-    }
-
-    #[test]
-    fn runtime_prompt_only_dispatch_guard_requires_new_transcript_input() {
-        assert!(!should_skip_runtime_prompt_only_dispatch(None, 7, 0));
-        assert!(!should_skip_runtime_prompt_only_dispatch(Some(6), 7, 0));
-        assert!(!should_skip_runtime_prompt_only_dispatch(Some(7), 7, 1));
-        assert!(should_skip_runtime_prompt_only_dispatch(Some(7), 7, 0));
     }
 
     #[test]

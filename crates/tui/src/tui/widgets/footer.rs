@@ -46,8 +46,6 @@ pub struct FooterProps {
     pub state_label: String,
     /// Color used for the status label.
     pub state_color: Color,
-    /// Coherence chip spans (empty when no active intervention).
-    pub coherence: Vec<Span<'static>>,
     /// Sub-agent count chip spans (empty when zero in-flight).
     pub agents: Vec<Span<'static>>,
     /// Reasoning-replay chip spans (empty when zero / not applicable).
@@ -243,8 +241,8 @@ pub struct FooterToast {
 
 impl FooterProps {
     /// Build footer props from common app state. Helpers in `tui/ui.rs`
-    /// (e.g. `footer_state_label`, `footer_coherence_spans`) supply the
-    /// pre-styled spans and labels — this constructor just bundles them.
+    /// supply the pre-styled spans and labels — this constructor just bundles
+    /// them.
     ///
     /// Argument fan-out is intentional: each input maps 1:1 to a piece of
     /// pre-computed footer content the caller resolved from `App`. Forcing
@@ -257,7 +255,6 @@ impl FooterProps {
         toast: Option<FooterToast>,
         state_label: &'static str,
         state_color: Color,
-        coherence: Vec<Span<'static>>,
         agents: Vec<Span<'static>>,
         reasoning_replay: Vec<Span<'static>>,
         cache: Vec<Span<'static>>,
@@ -290,7 +287,6 @@ impl FooterProps {
             footer_bg: app.ui_theme.footer_bg,
             state_label: state_label.to_string(),
             state_color,
-            coherence,
             agents,
             reasoning_replay,
             cache,
@@ -332,11 +328,10 @@ impl FooterWidget {
 
     fn auxiliary_spans(&self, max_width: usize) -> Vec<Span<'static>> {
         // `cost` is rendered in the left cluster now — keep it out of the
-        // right-hand chip parade. Coherence / agents / replay / cache are
-        // transient signals; they belong on the right where they appear and
+        // right-hand chip parade. Agents / replay / cache are transient
+        // signals; they belong on the right where they appear and
         // disappear without disturbing the steady mode·model·cost line.
         let parts: Vec<&Vec<Span<'static>>> = [
-            &self.props.coherence,
             &self.props.agents,
             &self.props.reasoning_replay,
             &self.props.cache,
@@ -759,7 +754,6 @@ mod tests {
             Vec::<Span<'static>>::new(),
             Vec::<Span<'static>>::new(),
             Vec::<Span<'static>>::new(),
-            Vec::<Span<'static>>::new(),
         );
         // `from_app` reads the process-wide retry-status surface; pin
         // `Idle` so footer tests don't pick up state set by retry-banner
@@ -781,7 +775,6 @@ mod tests {
         assert_eq!(props.text_hint_color, palette::TEXT_HINT);
         assert_eq!(props.text_muted_color, palette::TEXT_MUTED);
         assert_eq!(props.model, "deepseek-v4-flash");
-        assert!(props.coherence.is_empty());
         assert!(props.agents.is_empty());
         assert!(props.cache.is_empty());
         assert!(props.cost.is_empty());
@@ -872,7 +865,6 @@ mod tests {
             Vec::<Span<'static>>::new(),
             Vec::<Span<'static>>::new(),
             Vec::<Span<'static>>::new(),
-            Vec::<Span<'static>>::new(),
         );
 
         assert_eq!(props.state_label, "busy");
@@ -943,7 +935,6 @@ mod tests {
             None,
             "ready",
             palette::TEXT_MUTED,
-            Vec::<Span<'static>>::new(),
             agents,
             Vec::<Span<'static>>::new(),
             Vec::<Span<'static>>::new(),
@@ -1211,7 +1202,6 @@ mod tests {
             Vec::<Span<'static>>::new(),
             Vec::<Span<'static>>::new(),
             Vec::<Span<'static>>::new(),
-            Vec::<Span<'static>>::new(),
         )
     }
 
@@ -1306,7 +1296,6 @@ mod tests {
             Vec::<Span<'static>>::new(),
             Vec::<Span<'static>>::new(),
             Vec::<Span<'static>>::new(),
-            Vec::<Span<'static>>::new(),
             vec![Span::styled(cost.to_string(), Style::default())],
             Vec::<Span<'static>>::new(),
         )
@@ -1324,7 +1313,6 @@ mod tests {
             None,
             "ready",
             palette::TEXT_MUTED,
-            Vec::<Span<'static>>::new(),
             Vec::<Span<'static>>::new(),
             Vec::<Span<'static>>::new(),
             long_cache,
@@ -1357,7 +1345,6 @@ mod tests {
             None,
             "ready",
             palette::TEXT_MUTED,
-            Vec::<Span<'static>>::new(),
             Vec::<Span<'static>>::new(),
             Vec::<Span<'static>>::new(),
             cache,
@@ -1422,7 +1409,6 @@ mod tests {
             Some(toast),
             "ready",
             palette::TEXT_MUTED,
-            Vec::<Span<'static>>::new(),
             Vec::<Span<'static>>::new(),
             Vec::<Span<'static>>::new(),
             Vec::<Span<'static>>::new(),

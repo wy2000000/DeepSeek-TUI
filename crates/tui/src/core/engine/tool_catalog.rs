@@ -35,9 +35,7 @@ pub(super) fn is_tool_search_tool(name: &str) -> bool {
 }
 
 pub(super) const DEFAULT_ACTIVE_NATIVE_TOOLS: &[&str] = &[
-    "agent_close",
-    "agent_eval",
-    "agent_open",
+    "agent",
     "apply_patch",
     "checklist_write",
     "edit_file",

@@ -87,8 +87,8 @@ pub struct Session {
     /// Consumed by [`crate::core::engine::token_estimate_cache::TokenEstimateCache`]
     /// to memoize the per-turn token estimate without re-walking the message
     /// list. Defaults to 0; bumped in [`Session::add_message`],
-    /// [`Session::replace_messages`], and at every other mutation site in
-    /// `core/engine.rs` / `core/engine/capacity_flow.rs`.
+    /// [`Session::replace_messages`], and at other mutation sites in
+    /// `core/engine.rs`.
     pub messages_revision: u64,
 }
 
@@ -174,9 +174,9 @@ impl Session {
     }
 
     /// Replace the entire message history. Used by session resume and
-    /// capacity interventions. Bumps `messages_revision` exactly once even
-    /// when the new history has a different length, so downstream caches
-    /// invalidate atomically.
+    /// compaction. Bumps `messages_revision` exactly once even when the new
+    /// history has a different length, so downstream caches invalidate
+    /// atomically.
     #[allow(dead_code)]
     pub fn replace_messages(&mut self, messages: Vec<Message>) {
         self.messages = messages.into();

@@ -3,7 +3,7 @@
 //! Two cards consume the #130 mailbox stream and render live in the chat
 //! transcript:
 //!
-//! - [`DelegateCard`] — single `agent_spawn` invocation. Live tree of the
+//! - [`DelegateCard`] — single `agent` invocation. Live tree of the
 //!   last 3 actions plus a header with status / glyph / role.
 //! - [`FanoutCard`] — `rlm` fanout (or any future multi-child dispatch).
 //!   Dot-grid of worker slots (`●` filled, `○` pending) plus an aggregate
@@ -35,7 +35,7 @@ pub enum AgentLifecycle {
     Failed,
     Cancelled,
     /// Interrupted with a continuable checkpoint (e.g. API timeout); not
-    /// running, but recoverable via `agent_eval` continuation.
+    /// running, but recoverable from its checkpoint.
     Interrupted,
 }
 
@@ -70,7 +70,7 @@ impl AgentLifecycle {
     }
 }
 
-/// Card for a single delegated `agent_spawn` invocation.
+/// Card for a single delegated `agent` invocation.
 ///
 /// Stores the last [`DELEGATE_MAX_ACTIONS`] action lines; older entries are
 /// truncated and a single ellipsis row is rendered above the visible tail.
@@ -403,7 +403,6 @@ fn readable_agent_role(agent_type: &str) -> String {
         "review" => "reviewer".to_string(),
         "implementer" => "builder".to_string(),
         "verifier" => "verifier".to_string(),
-        "tool_agent" | "tool-agent" | "fin" => "executor".to_string(),
         "custom" => "specialist".to_string(),
         other => other.to_string(),
     }

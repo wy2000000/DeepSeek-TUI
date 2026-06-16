@@ -36,8 +36,8 @@ runtime, or a different way to *observe* it.
 
 - A **sub-agent** is the user-facing name for a *nested assignment* with a role
   (`explore`, `review`, `implementer`, `verifier`, ...). It should be backed by
-  the same worker run lifecycle as fleet. `agent_open` is the compatibility
-  launcher, not a second runtime.
+  the same worker run lifecycle as fleet. `agent` is the model-facing launcher,
+  not a second runtime.
 - **`codewhale exec`** is the headless front door: usable by anyone at any time
   (CI, scripts, another agent), full tools, emits a `stream-json` event stream,
   and can spawn sub-agents. It is *the* runtime with a CLI on it.
@@ -53,7 +53,7 @@ for a nested worker.
 
 ## The cutover rule
 
-If a detached `agent_open` child can fail on a one-off provider timeout with no
+If a detached `agent` child can fail on a one-off provider timeout with no
 retry while an equivalent fleet worker would retry and preserve ledger evidence,
 then the cutover is incomplete. Treat that as a CodeWhale runtime gap, not as
 normal "sub-agent behavior".
@@ -61,7 +61,7 @@ normal "sub-agent behavior".
 The target rule is:
 
 - durable or long-running work goes through the fleet worker lifecycle;
-- `agent_open` may stay as the friendly nested-agent API, but it should enqueue
+- `agent` should enqueue
   or observe a fleet-backed worker run instead of owning an independent
   lifecycle;
 - in-process children are allowed only as a small compatibility/latency
@@ -108,7 +108,7 @@ delegation levels. Sub-agents and fleet workers share **one** axis, sourced from
 - `DEFAULT_SPAWN_DEPTH = 3` — the default budget for both standalone sub-agents
   and fleet workers (so they cannot drift into "two moving targets");
 - `MAX_SPAWN_DEPTH_CEILING = 3` — the hard cap that every configured value
-  (fleet `max_spawn_depth`, `agent_open`'s `max_depth`) clamps to.
+  (fleet `max_spawn_depth`, `agent`'s `max_depth`) clamps to.
 
 The root worker always runs even at budget 0; the budget gates *child*
 delegation. The default affords at least three nested levels.
@@ -134,7 +134,7 @@ CodeWhale should converge with Claude Code on **shape**, not on branding:
   multi-provider support; the local-first **Agent Fleet** (durable, SSH-capable
   orchestration) as CodeWhale's own layer above the shared runtime; WhaleFlow as
   the orchestration overlay.
-- **Do not** fork execution semantics per surface. The TUI, `agent_open`,
+- **Do not** fork execution semantics per surface. The TUI, `agent`,
   `exec`, the Runtime API, and the fleet must all drive the *same* runtime and
   observe the *same* event stream — divergence there is what produced the "two
   moving targets" this document exists to prevent.

@@ -7,7 +7,6 @@ use std::{path::PathBuf, sync::Arc};
 
 use serde_json::Value;
 
-use crate::core::coherence::CoherenceState;
 use crate::error_taxonomy::ErrorEnvelope;
 use crate::models::{Message, SystemPrompt, Tool, Usage};
 use crate::tools::goal::GoalSnapshot;
@@ -72,9 +71,6 @@ pub enum Event {
         name: String,
         input: Value,
     },
-
-    /// Tool execution progress (for long-running tools)
-    ToolCallProgress { id: String, output: String },
 
     /// Tool call completed
     ToolCallComplete {
@@ -150,53 +146,6 @@ pub enum Event {
         id: String,
         auto: bool,
         message: String,
-    },
-
-    /// Capacity decision telemetry.
-    #[allow(dead_code)]
-    CapacityDecision {
-        session_id: String,
-        turn_id: String,
-        h_hat: f64,
-        c_hat: f64,
-        slack: f64,
-        min_slack: f64,
-        violation_ratio: f64,
-        p_fail: f64,
-        risk_band: String,
-        action: String,
-        cooldown_blocked: bool,
-        reason: String,
-    },
-
-    /// Capacity intervention telemetry.
-    #[allow(dead_code)]
-    CapacityIntervention {
-        session_id: String,
-        turn_id: String,
-        action: String,
-        before_prompt_tokens: usize,
-        after_prompt_tokens: usize,
-        compaction_size_reduction: usize,
-        replay_outcome: Option<String>,
-        replan_performed: bool,
-    },
-
-    /// Capacity memory persistence failure telemetry.
-    #[allow(dead_code)]
-    CapacityMemoryPersistFailed {
-        session_id: String,
-        turn_id: String,
-        action: String,
-        error: String,
-    },
-
-    /// Plain-language session coherence state.
-    CoherenceState {
-        state: CoherenceState,
-        label: String,
-        description: String,
-        reason: String,
     },
 
     // === Sub-Agent Events ===

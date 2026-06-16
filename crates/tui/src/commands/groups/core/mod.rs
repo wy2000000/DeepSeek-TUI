@@ -364,7 +364,7 @@ pub fn agent(_app: &mut App, arg: Option<&str>) -> CommandResult {
         }
     };
     let message = format!(
-        "Open a persistent sub-agent session for this task. Call `agent_open` with name `slash_agent`, `prompt: {task:?}`, and `max_depth: {max_depth}`. Use nonblocking `agent_eval` to poll the current projection or send follow-up input while you keep working; pass `block:true` only when you deliberately want to wait for a terminal result. Use `handle_read` on the returned transcript_handle if you need more detail. Verify any claimed side effects before reporting success."
+        "Launch one sub-agent for this task by calling `agent` with name `slash_agent`, `prompt: {task:?}`, and `max_depth: {max_depth}`. Use `handle_read` on the returned transcript_handle if you need more detail. Verify any claimed side effects before reporting success."
     );
     CommandResult::with_message_and_action(
         format!("Opening persistent sub-agent at depth {max_depth}..."),
@@ -388,7 +388,7 @@ pub fn swarm(_app: &mut App, arg: Option<&str>) -> CommandResult {
         );
     }
     CommandResult::error(
-        "/swarm is gated in v0.8.61: prompt-only agent_open fanout is disabled until the durable Train-3 worker/goal re-dispatch substrate lands. Use /goal for the persistent objective or /agent [N] <task> for one bounded sub-agent.",
+        "/swarm is gated in v0.8.61: prompt-only agent fanout is disabled until the durable Train-3 worker/goal re-dispatch substrate lands. Use /goal for the persistent objective or /agent [N] <task> for one bounded sub-agent.",
     )
 }
 

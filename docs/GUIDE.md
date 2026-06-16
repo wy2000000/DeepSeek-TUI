@@ -183,8 +183,8 @@ The interactive TUI has a few stable regions:
 The footer status line is configurable. Run `/statusline` to choose which
 footer chips are visible, or set `[tui].status_items` in `config.toml` to
 control both selection and order. Supported keys currently include `mode`,
-`model`, `cost`, `balance` (DeepSeek / DeepSeekCN only), `status`, `coherence`,
-`agents`, `reasoning_replay`, `prefix_stability`, `cache`, `context_percent`,
+`model`, `cost`, `balance` (DeepSeek / DeepSeekCN only), `status`, `agents`,
+`reasoning_replay`, `prefix_stability`, `cache`, `context_percent`,
 `git_branch`, `last_tool_elapsed` (placeholder), `rate_limit` (placeholder),
 and `tokens`. Omit `status_items` to keep the built-in default order; set it to
 `[]` to hide configurable chips.
@@ -345,11 +345,10 @@ Sub-agents are background child agents. The parent session gives a child a
 focused task, receives an agent id, and can continue working while the child
 runs.
 
-The main orchestration tools are:
+The main orchestration tool is:
 
-- `agent_open`: start a child with a task and role.
-- `agent_eval`: wait for and collect the child result.
-- `agent_close`: cancel a running child.
+- `agent`: start a focused child with a task and role. The child runs in the
+  background and returns a compact receipt plus transcript handle.
 
 You normally do not need to call these tools directly. Ask for parallel work in
 plain language:
