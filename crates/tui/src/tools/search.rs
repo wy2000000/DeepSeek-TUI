@@ -806,7 +806,12 @@ mod tests {
         assert_eq!(parsed["files_searched"].as_u64().unwrap(), 1);
         let matches = parsed["matches"].as_array().unwrap();
         assert_eq!(matches.len(), 1);
-        assert!(matches[0]["file"].as_str().unwrap().ends_with("real/needle.txt"));
+        assert!(
+            matches[0]["file"]
+                .as_str()
+                .unwrap()
+                .ends_with("real/needle.txt")
+        );
     }
 
     #[tokio::test]
