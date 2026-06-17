@@ -117,7 +117,7 @@ fn is_delegated_tool(tool: &str) -> bool {
     matches!(tool, "agent" | "delegate")
 }
 
-fn no_progress_attempt_threshold(tool: &str, read_only: bool) -> Option<u32> {
+fn no_progress_attempt_threshold(tool: &str, _read_only: bool) -> Option<u32> {
     if is_delegated_tool(tool) {
         return Some(DELEGATED_TOOL_LOOP_BLOCK_THRESHOLD);
     }
