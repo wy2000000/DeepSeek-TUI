@@ -1,6 +1,7 @@
 pub mod provider;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
 use std::io::Write;
@@ -2992,7 +2993,7 @@ impl ConfigStore {
             return Ok(0);
         }
 
-        let path = self.permissions_path();
+        let path = checked_permissions_path_for_config_path(&self.path)?;
         let raw = if path.exists() {
             fs::read_to_string(&path)
                 .with_context(|| format!("failed to read permissions at {}", path.display()))?
@@ -3046,17 +3047,43 @@ impl ConfigStore {
     }
 }
 
-fn config_backup_path(path: &Path) -> PathBuf {
+fn config_backup_file_name(path: &Path) -> OsString {
     let mut file_name = path
         .file_name()
-        .map(std::ffi::OsString::from)
-        .unwrap_or_else(|| std::ffi::OsString::from(CONFIG_FILE_NAME));
+        .map(OsString::from)
+        .unwrap_or_else(|| OsString::from(CONFIG_FILE_NAME));
     file_name.push(".bak");
-    path.with_file_name(file_name)
+    file_name
+}
+
+fn config_sibling_path_unchecked(config_path: &Path, file_name: &OsStr) -> PathBuf {
+    config_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(file_name)
+}
+
+fn checked_config_sibling_path(config_path: &Path, file_name: &OsStr) -> Result<PathBuf> {
+    let config_path = normalize_config_file_path(config_path.to_path_buf())?;
+    let parent = config_path
+        .parent()
+        .context("config path must include a parent directory")?;
+    let path = parent.join(file_name);
+    reject_path_symlink(&path)?;
+    Ok(path)
+}
+
+#[cfg(test)]
+fn config_backup_path(path: &Path) -> PathBuf {
+    config_sibling_path_unchecked(path, &config_backup_file_name(path))
+}
+
+fn checked_config_backup_path(path: &Path) -> Result<PathBuf> {
+    checked_config_sibling_path(path, &config_backup_file_name(path))
 }
 
 fn write_one_time_config_backup(path: &Path) -> Result<()> {
-    let backup = config_backup_path(path);
+    let backup = checked_config_backup_path(path)?;
     if backup.exists() {
         return Ok(());
     }
@@ -3439,17 +3466,19 @@ pub fn resolve_config_path(explicit: Option<PathBuf>) -> Result<PathBuf> {
 
 #[must_use]
 pub fn permissions_path_for_config_path(config_path: &Path) -> PathBuf {
-    config_path.with_file_name(PERMISSIONS_FILE_NAME)
+    config_sibling_path_unchecked(config_path, OsStr::new(PERMISSIONS_FILE_NAME))
+}
+
+fn checked_permissions_path_for_config_path(config_path: &Path) -> Result<PathBuf> {
+    checked_config_sibling_path(config_path, OsStr::new(PERMISSIONS_FILE_NAME))
 }
 
 pub fn resolve_permissions_path(config_path: Option<PathBuf>) -> Result<PathBuf> {
-    Ok(permissions_path_for_config_path(&resolve_config_path(
-        config_path,
-    )?))
+    checked_permissions_path_for_config_path(&resolve_config_path(config_path)?)
 }
 
 fn load_sibling_permissions(config_path: &Path) -> Result<PermissionsToml> {
-    let permissions_path = permissions_path_for_config_path(config_path);
+    let permissions_path = checked_permissions_path_for_config_path(config_path)?;
     if !permissions_path.exists() {
         return Ok(PermissionsToml::default());
     }
@@ -3784,12 +3813,42 @@ fn normalize_config_file_path(path: PathBuf) -> Result<PathBuf> {
     if path.file_name().is_none() {
         bail!("config path must include a file name");
     }
-    if path.is_absolute() {
-        return Ok(path);
+    let absolute = if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir()
+            .context("failed to resolve current directory for config path")?
+            .join(path)
+    };
+    let file_name = absolute
+        .file_name()
+        .map(OsString::from)
+        .context("config path must include a file name")?;
+    let parent = absolute
+        .parent()
+        .context("config path must include a parent directory")?;
+    let parent = match parent.canonicalize() {
+        Ok(parent) => parent,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => parent.to_path_buf(),
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!("failed to resolve config directory {}", parent.display())
+            });
+        }
+    };
+    let normalized = parent.join(file_name);
+    reject_path_symlink(&normalized)?;
+    Ok(normalized)
+}
+
+fn reject_path_symlink(path: &Path) -> Result<()> {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return Ok(());
+    };
+    if metadata.file_type().is_symlink() {
+        bail!("config path must not be a symlink: {}", path.display());
     }
-    Ok(std::env::current_dir()
-        .context("failed to resolve current directory for config path")?
-        .join(path))
+    Ok(())
 }
 
 #[derive(Debug, Clone, Default)]

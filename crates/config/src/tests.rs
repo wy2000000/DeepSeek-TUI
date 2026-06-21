@@ -205,9 +205,10 @@ fn config_store_loads_sibling_permissions_toml() {
     ));
     fs::create_dir_all(&dir).expect("mkdir");
     let config_path = dir.join(CONFIG_FILE_NAME);
+    let permissions_path = dir.join(PERMISSIONS_FILE_NAME);
     fs::write(&config_path, "model = \"deepseek-v4-flash\"\n").expect("write config");
     fs::write(
-        dir.join(PERMISSIONS_FILE_NAME),
+        &permissions_path,
         r#"
         [[rules]]
         tool = "exec_shell"
@@ -231,8 +232,11 @@ fn config_store_loads_sibling_permissions_toml() {
         ]
     );
     assert_eq!(
-        store.permissions_path(),
-        config_path.with_file_name(PERMISSIONS_FILE_NAME)
+        store
+            .permissions_path()
+            .canonicalize()
+            .expect("store perms"),
+        permissions_path.canonicalize().expect("expected perms")
     );
 
     let _ = fs::remove_dir_all(dir);
@@ -2112,6 +2116,49 @@ fn normalize_config_file_path_rejects_traversal() {
     let err = normalize_config_file_path(PathBuf::from("../config.toml"))
         .expect_err("traversal path should fail");
     assert!(format!("{err:#}").contains("cannot contain '..'"));
+}
+
+#[cfg(unix)]
+#[test]
+fn normalize_config_file_path_rejects_symlink_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let target = dir.path().join("target.toml");
+    let link = dir.path().join(CONFIG_FILE_NAME);
+    fs::write(&target, "model = \"deepseek-v4-flash\"\n").expect("write target");
+    std::os::unix::fs::symlink(&target, &link).expect("symlink config");
+
+    let err = normalize_config_file_path(link).expect_err("symlink config should fail");
+    assert!(format!("{err:#}").contains("must not be a symlink"));
+}
+
+#[cfg(unix)]
+#[test]
+fn load_sibling_permissions_rejects_symlink_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config_path = dir.path().join(CONFIG_FILE_NAME);
+    let outside = dir.path().join("outside-permissions.toml");
+    let permissions_link = dir.path().join(PERMISSIONS_FILE_NAME);
+    fs::write(&config_path, "model = \"deepseek-v4-flash\"\n").expect("write config");
+    fs::write(&outside, "").expect("write outside permissions");
+    std::os::unix::fs::symlink(&outside, &permissions_link).expect("symlink permissions");
+
+    let err = load_sibling_permissions(&config_path).expect_err("symlink permissions should fail");
+    assert!(format!("{err:#}").contains("must not be a symlink"));
+}
+
+#[cfg(unix)]
+#[test]
+fn write_config_backup_rejects_symlink_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config_path = dir.path().join(CONFIG_FILE_NAME);
+    let outside = dir.path().join("outside-backup.toml");
+    let backup_link = config_backup_path(&config_path);
+    fs::write(&config_path, "model = \"deepseek-v4-flash\"\n").expect("write config");
+    fs::write(&outside, "").expect("write outside backup");
+    std::os::unix::fs::symlink(&outside, &backup_link).expect("symlink backup");
+
+    let err = write_one_time_config_backup(&config_path).expect_err("symlink backup should fail");
+    assert!(format!("{err:#}").contains("must not be a symlink"));
 }
 
 #[cfg(unix)]
