@@ -2253,7 +2253,10 @@ fn run_setup_status(config: &Config, workspace: &Path) -> Result<()> {
             );
         }
     }
-    println!("  · base_url: {}", config.deepseek_base_url());
+    println!(
+        "  · base_url: {}",
+        crate::client::redact_url_for_display(&config.deepseek_base_url())
+    );
     let model = config
         .default_text_model
         .clone()
@@ -2596,7 +2599,10 @@ async fn run_doctor(config: &Config, workspace: &Path, config_path_override: Opt
     println!("{}", "API Connectivity:".bold());
     let api_target = doctor_api_target(config);
     println!("  · provider: {}", api_target.provider);
-    println!("  · base_url: {}", api_target.base_url);
+    println!(
+        "  · base_url: {}",
+        crate::client::redact_url_for_display(&api_target.base_url)
+    );
     println!("  · model: {}", api_target.model);
     let tls_status = doctor_tls_status(config);
     if !tls_status.certificate_verification {
@@ -3404,7 +3410,7 @@ fn run_doctor_json(
         "api_key": {
             "source": api_key_state,
         },
-        "base_url": api_target.base_url,
+        "base_url": crate::client::redact_url_for_display(&api_target.base_url),
         "default_text_model": api_target.model,
         "strict_tool_mode": {
             "enabled": strict_tool_mode.enabled,
