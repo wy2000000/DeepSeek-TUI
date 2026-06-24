@@ -82,10 +82,9 @@ pub struct RuntimeApiState {
     bind_host: String,
     bind_port: u16,
     mobile_enabled: bool,
-    /// Shared McpPool reused across HTTP API calls so each call does not
-    /// spawn a duplicate set of MCP server processes. The engine maintains
-    /// its own separate pool; this one is for read-only tool discovery via
-    /// the API.
+    /// Shared McpPool reused for explicit live MCP discovery. Passive API
+    /// calls do not initialize this pool so dashboards cannot accidentally
+    /// become a second stdio-process owner.
     mcp_pool: Arc<Mutex<Option<McpPool>>>,
 }
 
@@ -457,6 +456,8 @@ struct McpServersResponse {
 #[derive(Debug, Deserialize)]
 struct McpToolsQuery {
     server: Option<String>,
+    #[serde(default)]
+    connect: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -2200,14 +2201,22 @@ async fn list_mcp_tools(
     Query(query): Query<McpToolsQuery>,
 ) -> Result<Json<McpToolsResponse>, ApiError> {
     let mut pool_guard = state.mcp_pool.lock().await;
-    if pool_guard.is_none() {
+    if query.connect && pool_guard.is_none() {
         let new_pool =
             McpPool::from_config_path_with_workspace(&state.mcp_config_path, &state.workspace)
                 .map_err(|e| ApiError::internal(format!("Failed to load MCP config: {e}")))?;
         pool_guard.replace(new_pool);
     }
-    let pool = pool_guard.as_mut().unwrap();
-    let _errors = pool.connect_all().await;
+
+    if query.connect {
+        if let Some(pool) = pool_guard.as_mut() {
+            let _errors = pool.connect_all().await;
+        }
+    }
+
+    let Some(pool) = pool_guard.as_ref() else {
+        return Ok(Json(McpToolsResponse { tools: Vec::new() }));
+    };
 
     let mut tools = Vec::new();
     for (prefixed_name, tool) in pool.all_tools() {

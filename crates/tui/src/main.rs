@@ -5319,6 +5319,21 @@ enum McpServerDoctorStatus {
     Error(String),
 }
 
+fn is_relative_stdio_path_arg(value: &str) -> bool {
+    if value.is_empty() || value.starts_with('-') || value.contains("://") || value.starts_with('~')
+    {
+        return false;
+    }
+    let looks_like_path = value.contains('/') || value.contains('\\');
+    if !looks_like_path {
+        return false;
+    }
+    let bytes = value.as_bytes();
+    let windows_absolute = value.starts_with("\\\\")
+        || (bytes.len() >= 3 && bytes[1] == b':' && (bytes[2] == b'\\' || bytes[2] == b'/'));
+    !Path::new(value).is_absolute() && !windows_absolute
+}
+
 /// Check an MCP server config entry for common issues.
 fn doctor_check_mcp_server(server: &McpServerConfig) -> McpServerDoctorStatus {
     // No command or URL — incomplete entry.
@@ -5344,6 +5359,23 @@ fn doctor_check_mcp_server(server: &McpServerConfig) -> McpServerDoctorStatus {
 
     if is_absolute && !cmd_path.exists() {
         return McpServerDoctorStatus::Error(format!("command not found: {cmd}"));
+    }
+
+    if server.cwd.is_none() {
+        if is_relative_stdio_path_arg(cmd) {
+            return McpServerDoctorStatus::Warning(format!(
+                "stdio server uses relative command \"{cmd}\" without cwd; set cwd so headless exec and UI status checks resolve the same path"
+            ));
+        }
+        if let Some(arg) = server
+            .args
+            .iter()
+            .find(|arg| is_relative_stdio_path_arg(arg))
+        {
+            return McpServerDoctorStatus::Warning(format!(
+                "stdio server uses relative path argument \"{arg}\" without cwd; set cwd so headless exec and UI status checks resolve the same path"
+            ));
+        }
     }
 
     // Detect self-hosted DeepSeek server entries.
@@ -8632,6 +8664,28 @@ mod doctor_mcp_tests {
         match doctor_check_mcp_server(&server) {
             McpServerDoctorStatus::Ok(detail) => assert!(detail.contains("stdio")),
             other => panic!("Expected Ok, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_relative_stdio_path_arg_without_cwd_warns() {
+        let server = make_server(Some("python"), &["server/mcp_server.py"], None);
+        match doctor_check_mcp_server(&server) {
+            McpServerDoctorStatus::Warning(detail) => {
+                assert!(detail.contains("relative path argument"));
+                assert!(detail.contains("cwd"));
+            }
+            other => panic!("Expected Warning for relative path argument, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_relative_stdio_path_arg_with_cwd_is_ok() {
+        let mut server = make_server(Some("python"), &["server/mcp_server.py"], None);
+        server.cwd = Some(PathBuf::from("/tmp/codewhale-project"));
+        match doctor_check_mcp_server(&server) {
+            McpServerDoctorStatus::Ok(detail) => assert!(detail.contains("stdio")),
+            other => panic!("Expected Ok when cwd anchors relative path, got {other:?}"),
         }
     }
 

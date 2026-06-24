@@ -739,6 +739,74 @@ async fn health_and_tasks_endpoints_work() -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn mcp_tools_endpoint_is_passive_until_connect_requested() -> Result<()> {
+    let root = std::env::temp_dir().join(format!("codewhale-mcp-tools-api-{}", Uuid::new_v4()));
+    let sessions_dir = root.join("sessions");
+    fs::create_dir_all(&root)?;
+    let sentinel = root.join("mcp-spawned");
+    fs::write(
+        root.join("mcp.json"),
+        serde_json::json!({
+            "servers": {
+                "sentinel": {
+                    "command": "sh",
+                    "args": [
+                        "-c",
+                        "printf spawned > \"$1\"",
+                        "sh",
+                        sentinel
+                    ]
+                }
+            }
+        })
+        .to_string(),
+    )?;
+
+    let Some((addr, _runtime_threads, handle)) =
+        spawn_test_server_with_root(root.clone(), sessions_dir).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    let passive: serde_json::Value = client
+        .get(format!("http://{addr}/v1/apps/mcp/tools"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(passive["tools"].as_array().map(Vec::len), Some(0));
+    assert!(
+        !sentinel.exists(),
+        "passive MCP tool listing must not spawn stdio servers"
+    );
+
+    let _live: serde_json::Value = client
+        .get(format!("http://{addr}/v1/apps/mcp/tools?connect=true"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+
+    for _ in 0..20 {
+        if sentinel.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        sentinel.exists(),
+        "explicit MCP connect should spawn configured stdio servers"
+    );
+
+    handle.abort();
+    Ok(())
+}
+
 #[tokio::test]
 async fn runtime_token_guard_protects_v1_routes() -> Result<()> {
     let root = std::env::temp_dir().join(format!("deepseek-runtime-api-{}", Uuid::new_v4()));
