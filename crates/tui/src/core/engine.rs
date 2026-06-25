@@ -1649,7 +1649,7 @@ impl Engine {
                         }
                         // Now dispatch the new message as a normal send,
                         // reusing the engine's stored mode/model config.
-                        let mode = AppMode::Agent; // default fallback
+                        let mode = self.current_mode;
                         self.handle_send_message(
                             new_message,
                             mode,
