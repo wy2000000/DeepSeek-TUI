@@ -5,6 +5,9 @@ constitution-first setup lane. It ties `/setup`, `/constitution`, doctor,
 context reports, and docs to one shared setup-state vocabulary instead of
 checking each surface in isolation.
 
+Current-build automated text/render evidence is recorded in
+`docs/evidence/v0867-constitution-setup-current-build-evidence.md`.
+
 ## Gate Commands
 
 Run these before claiming the setup lane is ready:
