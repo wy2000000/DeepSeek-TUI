@@ -292,12 +292,9 @@ impl AutoReviewPolicy {
                 .with_rule(rule.id.clone());
         }
 
-        // #3790: the Tab-selected mode is the single authority for whether a
-        // tool prompts. The auto-review "safety floor" that used to force
-        // publish / destructive / MCP holds *past* the mode was removed and
-        // deferred to 0.8.67 (to return together with Auto mode). Only an
-        // explicit Block (deny) rule above still refuses an action — a hard
-        // prohibition, not a prompt — and it applies in every mode.
+        if let Some(decision) = safety_floor(ctx) {
+            return decision;
+        }
 
         if let Some(rule) = self
             .allow_rules
@@ -330,17 +327,27 @@ impl AutoReviewPolicy {
     }
 }
 
+fn safety_floor(ctx: &AutoReviewContext<'_>) -> Option<AutoReviewDecision> {
+    match (ctx.action_kind, ctx.risk, ctx.run_origin) {
+        (ToolActionKind::Publish, _, _) => Some(AutoReviewDecision::new(
+            AutoReviewAction::HoldForReview,
+            "publish-like action requires durable review",
+        )),
+        (_, RiskLevel::Destructive, RunOrigin::Background | RunOrigin::Headless) => {
+            Some(AutoReviewDecision::new(
+                AutoReviewAction::HoldForReview,
+                "destructive background/headless action requires durable review",
+            ))
+        }
+        _ => None,
+    }
+}
+
 fn deterministic_fallback(ctx: &AutoReviewContext<'_>) -> AutoReviewDecision {
     match (ctx.category, ctx.risk, ctx.action_kind) {
         (_, RiskLevel::Benign, _) => {
             AutoReviewDecision::new(AutoReviewAction::Allow, "read-only action is allowed")
         }
-        // #3790: MCP actions are governed by the mode exactly like every other
-        // tool — the engine prompts in Agent and auto-approves in YOLO. The old
-        // unconditional HoldForReview here (which could hold even outside the
-        // user's chosen mode) was removed and deferred to 0.8.67. A destructive
-        // MCP action now falls through to the generic Destructive arm below,
-        // identical to a destructive shell command.
         (ToolCategory::Unknown, _, _) => AutoReviewDecision::new(
             AutoReviewAction::AskUser,
             "unknown tool category requires explicit review",
@@ -603,10 +610,7 @@ mod tests {
     }
 
     #[test]
-    fn allow_rule_for_publish_is_honored_without_a_floor_override() {
-        // #3790: with the safety floor removed, a user allow_rule is
-        // authoritative — nothing overrides it back to a hold. Previously the
-        // publish / headless-destructive floor beat the allow_rule.
+    fn safety_floor_holds_publish_before_allow_rules() {
         let policy = AutoReviewPolicy {
             allow_rules: vec![
                 AutoReviewRule::allow("allow-publish", "trusted publish")
@@ -623,14 +627,15 @@ mod tests {
 
         let decision = policy.evaluate(&ctx);
 
-        assert_eq!(decision.action, AutoReviewAction::Allow);
-        assert_eq!(decision.rule_id.as_deref(), Some("allow-publish"));
+        assert_eq!(decision.action, AutoReviewAction::HoldForReview);
+        assert_eq!(decision.rule_id.as_deref(), None);
+        assert!(decision.reason.contains("publish-like"));
     }
 
     #[test]
     fn mcp_read_allows_and_mcp_action_is_not_held_by_policy() {
-        // #3790: the policy no longer holds MCP actions. The mode governs MCP
-        // prompting at the engine exactly like shell — Agent prompts, YOLO runs.
+        // MCP actions are governed by the mode unless they are also classified
+        // as a publish-like action by name/arguments.
         let policy = AutoReviewPolicy::default();
         let read_ctx = ctx_for(
             "read_mcp_resource",
@@ -654,8 +659,7 @@ mod tests {
     }
 
     #[test]
-    fn git_push_tool_is_classified_publish_but_not_held() {
-        // #3790: still classified Publish (audit only); no longer force-held.
+    fn git_push_tool_is_classified_publish_and_held() {
         let policy = AutoReviewPolicy::default();
         let ctx = ctx_for(
             "git_push",
@@ -665,14 +669,14 @@ mod tests {
         );
 
         assert_eq!(ctx.action_kind, ToolActionKind::Publish);
-        assert_ne!(
+        assert_eq!(
             policy.evaluate(&ctx).action,
             AutoReviewAction::HoldForReview
         );
     }
 
     #[test]
-    fn shell_git_push_is_classified_publish_but_not_held() {
+    fn shell_git_push_is_classified_publish_and_held() {
         let policy = AutoReviewPolicy::default();
         let ctx = ctx_for(
             "exec_shell",
@@ -682,14 +686,14 @@ mod tests {
         );
 
         assert_eq!(ctx.action_kind, ToolActionKind::Publish);
-        assert_ne!(
+        assert_eq!(
             policy.evaluate(&ctx).action,
             AutoReviewAction::HoldForReview
         );
     }
 
     #[test]
-    fn shell_chained_publish_is_classified_publish_but_not_held() {
+    fn shell_chained_publish_is_classified_publish_and_held() {
         let policy = AutoReviewPolicy::default();
         let ctx = ctx_for(
             "exec_shell",
@@ -699,7 +703,7 @@ mod tests {
         );
 
         assert_eq!(ctx.action_kind, ToolActionKind::Publish);
-        assert_ne!(
+        assert_eq!(
             policy.evaluate(&ctx).action,
             AutoReviewAction::HoldForReview
         );
@@ -730,7 +734,7 @@ mod tests {
     }
 
     #[test]
-    fn shell_git_tag_creation_is_classified_publish_but_not_held() {
+    fn shell_git_tag_creation_is_classified_publish_and_held() {
         let policy = AutoReviewPolicy::default();
         let ctx = ctx_for(
             "exec_shell",
@@ -740,14 +744,14 @@ mod tests {
         );
 
         assert_eq!(ctx.action_kind, ToolActionKind::Publish);
-        assert_ne!(
+        assert_eq!(
             policy.evaluate(&ctx).action,
             AutoReviewAction::HoldForReview
         );
     }
 
     #[test]
-    fn shell_git_tag_delete_is_classified_publish_but_not_held() {
+    fn shell_git_tag_delete_is_classified_publish_and_held() {
         let policy = AutoReviewPolicy::default();
         let ctx = ctx_for(
             "exec_shell",
@@ -757,7 +761,7 @@ mod tests {
         );
 
         assert_eq!(ctx.action_kind, ToolActionKind::Publish);
-        assert_ne!(
+        assert_eq!(
             policy.evaluate(&ctx).action,
             AutoReviewAction::HoldForReview
         );

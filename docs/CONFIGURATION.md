@@ -1182,7 +1182,7 @@ If you are upgrading from older releases:
   `unknown`; invalid names fail config validation instead of becoming broad
   rules. `natural_language_guidance` is recorded on the runtime policy and audit
   event, but deterministic rules and the built-in safety floor are the enforced
-  behavior in v0.8.65.
+  behavior in current builds.
 
   Auto-review decisions emit `tool.auto_review_decision` audit events when tool
   audit logging is enabled. Future PreToolUse/PostToolUse hooks can add

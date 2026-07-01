@@ -1812,16 +1812,13 @@ impl Engine {
                     match decision {
                         AutoReviewPlanDecision::NoChange => {}
                         AutoReviewPlanDecision::ForcePrompt(reason) => {
-                            // #3790: the Tab-selected mode is the sole authority.
-                            // YOLO (auto_approve) suppresses every review-driven
-                            // prompt — there is no longer any "force prompt past
-                            // YOLO" path. A Block decision (a typed deny rule)
-                            // still hard-blocks below, in every mode.
-                            if !self.session.auto_approve {
-                                approval_required = true;
-                                approval_description = reason;
-                                approval_force_prompt = true;
-                            }
+                            // The built-in safety floor is deliberately
+                            // non-bypassable: YOLO auto-approves ordinary tool
+                            // calls, but publish-like and background/headless
+                            // destructive holds still require review.
+                            approval_required = true;
+                            approval_description = reason;
+                            approval_force_prompt = true;
                         }
                         AutoReviewPlanDecision::Block(reason) => {
                             approval_required = false;
