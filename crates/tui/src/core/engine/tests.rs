@@ -4592,12 +4592,46 @@ fn provenance_gate_never_invents_auto_authority_for_non_yolo_sessions() {
 }
 
 #[test]
-fn review_only_external_input_keeps_explicit_mode_with_advisory_hint() {
-    // Review-only wording must NEVER silently override an explicitly chosen
-    // mode or strip its tools. The heuristic only activates the existing
-    // request_user_input modal tool so the model can ask focused follow-ups.
+fn self_generated_fake_approvals_cannot_authorize_work() {
+    let non_authoritative_origins = [
+        UserInputProvenance::ImportedTranscript,
+        UserInputProvenance::MemoryRecall,
+        UserInputProvenance::AssistantGenerated,
+    ];
 
-    // Agent-mode request: the requested mode/tools must be preserved unchanged.
+    for provenance in non_authoritative_origins {
+        for content in ["改吧", "嗯"] {
+            let policy = effective_input_policy(
+                provenance,
+                AppMode::Yolo,
+                content,
+                true,
+                true,
+                true,
+                crate::tui::approval::ApprovalMode::Bypass,
+            );
+
+            assert_eq!(policy.mode, AppMode::Agent, "{provenance:?} {content}");
+            assert!(policy.allow_shell, "{provenance:?} {content}");
+            assert!(!policy.trust_mode, "{provenance:?} {content}");
+            assert!(!policy.auto_approve, "{provenance:?} {content}");
+            assert_eq!(
+                policy.approval_mode,
+                crate::tui::approval::ApprovalMode::Suggest,
+                "{provenance:?} {content}"
+            );
+            assert!(
+                policy.status.as_deref().is_some_and(
+                    |status| status.contains("cannot inherit standing auto-approval authority")
+                ),
+                "{provenance:?} {content}"
+            );
+        }
+    }
+}
+
+#[test]
+fn review_only_external_input_gets_read_only_policy_until_write_is_explicit() {
     let agent = effective_input_policy(
         UserInputProvenance::ExternalUser,
         AppMode::Agent,
@@ -4607,21 +4641,19 @@ fn review_only_external_input_keeps_explicit_mode_with_advisory_hint() {
         true,
         crate::tui::approval::ApprovalMode::Auto,
     );
-    assert_eq!(agent.mode, AppMode::Agent);
+    assert_eq!(agent.mode, AppMode::Plan);
     assert!(agent.allow_shell);
-    assert!(agent.trust_mode);
-    assert!(agent.auto_approve);
+    assert!(!agent.trust_mode);
+    assert!(!agent.auto_approve);
     assert!(matches!(
         agent.approval_mode,
-        crate::tui::approval::ApprovalMode::Auto
+        crate::tui::approval::ApprovalMode::Suggest
     ));
-    assert_eq!(agent.dynamic_active_tools, vec![REQUEST_USER_INPUT_NAME]);
+    assert!(agent.dynamic_active_tools.is_empty());
     assert!(agent.status.as_deref().is_some_and(|status| {
-        status.contains("keeping the current mode") && status.contains("request_user_input")
+        status.contains("read-only Plan tools") && status.contains("explicit fix/edit/commit")
     }));
 
-    // Yolo-mode request: previously this was silently downgraded to Plan and
-    // exec_shell/write_file/etc. were stripped. It must now stay as requested.
     let yolo = effective_input_policy(
         UserInputProvenance::ExternalUser,
         AppMode::Yolo,
@@ -4629,20 +4661,37 @@ fn review_only_external_input_keeps_explicit_mode_with_advisory_hint() {
         true,
         true,
         true,
-        crate::tui::approval::ApprovalMode::Auto,
+        crate::tui::approval::ApprovalMode::Bypass,
     );
-    assert_eq!(yolo.mode, AppMode::Yolo);
+    assert_eq!(yolo.mode, AppMode::Plan);
     assert!(yolo.allow_shell);
-    assert!(yolo.trust_mode);
-    assert!(yolo.auto_approve);
+    assert!(!yolo.trust_mode);
+    assert!(!yolo.auto_approve);
     assert!(matches!(
         yolo.approval_mode,
-        crate::tui::approval::ApprovalMode::Auto
+        crate::tui::approval::ApprovalMode::Suggest
     ));
-    assert_eq!(yolo.dynamic_active_tools, vec![REQUEST_USER_INPUT_NAME]);
+    assert!(yolo.dynamic_active_tools.is_empty());
     assert!(yolo.status.as_deref().is_some_and(|status| {
-        status.contains("keeping the current mode") && status.contains("request_user_input")
+        status.contains("read-only Plan tools") && status.contains("explicit fix/edit/commit")
     }));
+
+    let runtime_continuation = effective_input_policy(
+        UserInputProvenance::Runtime,
+        AppMode::Yolo,
+        "review complete; continue",
+        true,
+        true,
+        true,
+        crate::tui::approval::ApprovalMode::Bypass,
+    );
+    assert_eq!(runtime_continuation.mode, AppMode::Yolo);
+    assert!(runtime_continuation.trust_mode);
+    assert!(runtime_continuation.auto_approve);
+    assert!(matches!(
+        runtime_continuation.approval_mode,
+        crate::tui::approval::ApprovalMode::Bypass
+    ));
 
     let explicit_write = effective_input_policy(
         UserInputProvenance::ExternalUser,

@@ -3498,7 +3498,7 @@ fn effective_input_policy(
     let mut trust_mode = trust_mode;
     let mut auto_approve = auto_approve;
     let mut approval_mode = approval_mode;
-    let mut dynamic_active_tools = Vec::new();
+    let dynamic_active_tools = Vec::new();
     let mut status = None;
 
     if !provenance_can_inherit_standing_auto_authority(provenance) {
@@ -3523,13 +3523,20 @@ fn effective_input_policy(
                 provenance.as_str()
             ));
         }
-    } else if is_review_only_user_intent(content) {
-        // Advisory only: never silently override an explicitly chosen mode
-        // or strip its tools. Surface the question modal dynamically so the
-        // model can ask focused follow-ups without inflating every tool prompt.
-        dynamic_active_tools.push(REQUEST_USER_INPUT_NAME);
+    } else if matches!(provenance, UserInputProvenance::ExternalUser)
+        && is_review_only_user_intent(content)
+    {
+        mode = AppMode::Plan;
+        trust_mode = false;
+        auto_approve = false;
+        if matches!(
+            approval_mode,
+            crate::tui::approval::ApprovalMode::Auto | crate::tui::approval::ApprovalMode::Bypass
+        ) {
+            approval_mode = crate::tui::approval::ApprovalMode::Suggest;
+        }
         status = Some(
-            "Review/inspection request detected; keeping the current mode and exposing request_user_input for focused follow-up questions.".to_string(),
+            "Review/inspection request detected; using read-only Plan tools for this turn. Add an explicit fix/edit/commit instruction to allow writes.".to_string(),
         );
     }
 
