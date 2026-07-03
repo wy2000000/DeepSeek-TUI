@@ -1,8 +1,8 @@
 //! Plugin command area: list installed plugins and (future) execute plugins.
 //!
 //! Plugins are script-based tools discovered in a configured plugin directory
-//! (default: `~/.codewhale/tools`). The `/plugins` command lists them and
-//! shows per-plugin metadata. A future `/plugin` command will handle execution.
+//! (default: `~/.codewhale/tools`). The `/plugin` command lists them and
+//! shows per-plugin metadata.
 
 use std::path::PathBuf;
 
@@ -28,13 +28,13 @@ impl CommandGroup for PluginsCommands {
 }
 
 // ---------------------------------------------------------------------------
-// `/plugins` — list or show detail
+// `/plugin` — list or show detail
 // ---------------------------------------------------------------------------
 
 pub(in crate::commands) const PLUGINS_INFO: CommandInfo = CommandInfo {
-    name: "plugins",
-    aliases: &["plugin"],
-    usage: "/plugins [name]",
+    name: "plugin",
+    aliases: &["plugins"],
+    usage: "/plugin [name]",
     description_id: MessageId::CmdPluginDescription,
 };
 
