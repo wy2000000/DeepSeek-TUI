@@ -3891,7 +3891,7 @@ fn print_doctor_setup_report(
         );
     }
     println!(
-        "  · next actions: /constitution (standing law), /setup report (readiness), /provider or /model (route), /config (runtime posture), /setup fleet (Operate/Fleet readiness), /fleet setup (explicit profile authoring)"
+        "  · next actions: /constitution (standing law), /setup report (readiness), /provider or /model (route), /config (runtime posture), /setup fleet (Operate/Fleet readiness), /fleet setup (explicit profile authoring), /setup hotbar (optional shortcuts)"
     );
     for step in codewhale_config::SetupStep::ALL {
         let entry = state.steps.get(&step);
@@ -4216,6 +4216,7 @@ fn doctor_setup_report_json(config: &Config, workspace: &Path) -> serde_json::Va
             "provider_model": "/provider or /model",
             "runtime_posture": "/config",
             "operate_fleet": "/setup fleet (readiness), /fleet setup (explicit profile authoring)",
+            "hotbar": "/setup hotbar",
         },
         "steps": steps,
     })
@@ -8447,6 +8448,7 @@ mod doctor_setup_state_tests {
             report["next_actions"]["operate_fleet"],
             "/setup fleet (readiness), /fleet setup (explicit profile authoring)"
         );
+        assert_eq!(report["next_actions"]["hotbar"], "/setup hotbar");
         assert_eq!(
             report["checkpoint_version"],
             crate::tui::setup::CONSTITUTION_CHECKPOINT_VERSION

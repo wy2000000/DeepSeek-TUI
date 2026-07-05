@@ -10202,6 +10202,14 @@ async fn handle_view_events(
                         Some("Fleet setup opened from /setup Operate/Fleet readiness.".to_string());
                 }
             }
+            ViewEvent::SetupOpenHotbarRequested => {
+                if app.view_stack.top_kind() != Some(ModalKind::HotbarSetup) {
+                    app.view_stack
+                        .push(crate::tui::hotbar::setup::HotbarSetupView::new(app, config));
+                    app.status_message =
+                        Some("Hotbar setup opened from /setup Hotbar readiness.".to_string());
+                }
+            }
             ViewEvent::SetupOpenModeRequested => {
                 if app.view_stack.top_kind() != Some(ModalKind::ModePicker) {
                     app.view_stack

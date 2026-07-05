@@ -429,8 +429,11 @@
     "VoiceProcessing": "🎙 文字起こし中...",
     "VoiceTranscribed": "🎙 文字起こし完了",
     "SetupActionFleet": "Fleet 設定",
+    "SetupActionHotbar": "Hotbar 設定",
     "SetupStepOperateFleetTitle": "Operate と Fleet",
     "SetupStepOperateFleetWhy": "現在のプロバイダー、実行姿勢、ロスター、並行設定で永続的なマルチワーカー作業を実行できるか確認します。プラン制限の検出は明示的な操作のままです。",
+    "SetupStepHotbarTitle": "Hotbar",
+    "SetupStepHotbarWhy": "コア設定パスが安全になったあと、よく使うルートやコマンドのショートカットを設定します。",
     "SetupOperateRuntimeLabel": "ワーカーランタイム:",
     "SetupOperateRosterLabel": "Fleet ロスター:",
     "SetupOperateConcurrencyLabel": "並行数:",
@@ -438,6 +441,10 @@
     "SetupOperateReviewHint": "Enter で現在の Operate/Fleet の事実を記録します。プラン制限の探索、認証情報の書き込み、Fleet 設定変更は行いません。",
     "SetupOperateReviewed": "Operate/Fleet の準備状態を記録しました。",
     "SetupOperateNeedsActionSaved": "Operate/Fleet はまだ対応が必要です。セットアップレポートに記録しました。",
+    "SetupHotbarBindingsLabel": "Hotbar バインド:",
+    "SetupHotbarActionsLabel": "バインド可能なアクション:",
+    "SetupHotbarReviewHint": "H で Hotbar スロットをカスタマイズします。Enter は設定を変更せず、現在の任意 Hotbar 状態だけを記録します。",
+    "SetupHotbarReviewed": "Hotbar setup 状態を記録しました。",
     "SetupReportOperateLabel": "Operate/Fleet:",
     "SetupReportNextActionOperate": "永続的なマルチワーカー実行の前に Operate/Fleet の準備状態を確認してください。"
 }

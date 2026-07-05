@@ -416,8 +416,11 @@
     "VoiceProcessing": "🎙 Transcrevendo...",
     "VoiceTranscribed": "🎙 Transcrito",
     "SetupActionFleet": "configurar Fleet",
+    "SetupActionHotbar": "configurar Hotbar",
     "SetupStepOperateFleetTitle": "Operate e Fleet",
     "SetupStepOperateFleetWhy": "Revise se o trabalho multi-worker durável pode rodar com o provedor, a postura de runtime, o roster e as configurações de concorrência atuais. A descoberta de limite do plano continua explícita.",
+    "SetupStepHotbarTitle": "Hotbar",
+    "SetupStepHotbarWhy": "Configure atalhos comuns de rotas e comandos depois que o caminho principal de setup estiver seguro.",
     "SetupOperateRuntimeLabel": "Runtime de workers:",
     "SetupOperateRosterLabel": "Roster da Fleet:",
     "SetupOperateConcurrencyLabel": "Concorrência:",
@@ -425,6 +428,10 @@
     "SetupOperateReviewHint": "Enter registra os fatos atuais de Operate/Fleet. Não testa limites do plano, não grava credenciais nem muda a configuração da Fleet.",
     "SetupOperateReviewed": "Prontidão de Operate/Fleet registrada.",
     "SetupOperateNeedsActionSaved": "Operate/Fleet ainda precisa de ação; registrado no relatório de setup.",
+    "SetupHotbarBindingsLabel": "Atalhos da Hotbar:",
+    "SetupHotbarActionsLabel": "Ações vinculáveis:",
+    "SetupHotbarReviewHint": "Pressione H para personalizar slots da Hotbar; Enter registra o estado opcional atual da Hotbar sem alterar a configuração.",
+    "SetupHotbarReviewed": "Estado de setup da Hotbar registrado.",
     "SetupReportOperateLabel": "Operate/Fleet:",
     "SetupReportNextActionOperate": "Revise a prontidão de Operate/Fleet antes de execuções multi-worker duráveis."
 }

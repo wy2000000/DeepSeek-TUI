@@ -49,6 +49,11 @@ impl RegisterCommand for SetupCmd {
                     step: SetupStep::OperateFleet,
                 })
             }
+            Some("hotbar" | "hotkeys" | "shortcuts" | "keys") => {
+                CommandResult::action(AppAction::OpenSetupWizardAt {
+                    step: SetupStep::Hotbar,
+                })
+            }
             Some(other) => CommandResult::error(format!(
                 "Unknown /setup target '{other}'. Try `/setup` to open the setup wizard."
             )),
@@ -131,6 +136,8 @@ mod tests {
             ("runtime", SetupStep::TrustSandbox),
             ("posture", SetupStep::TrustSandbox),
             ("constitution", SetupStep::Constitution),
+            ("hotbar", SetupStep::Hotbar),
+            ("shortcuts", SetupStep::Hotbar),
         ];
 
         for (arg, step) in cases {

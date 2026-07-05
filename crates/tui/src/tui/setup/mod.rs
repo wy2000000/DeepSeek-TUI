@@ -87,7 +87,7 @@ impl SetupWizardStep for StaticSetupStep {
     }
 }
 
-const STEP_SPECS: [StaticSetupStep; 6] = [
+const STEP_SPECS: [StaticSetupStep; 7] = [
     StaticSetupStep {
         id: SetupStep::Language,
         title_id: MessageId::SetupStepLanguageTitle,
@@ -116,6 +116,12 @@ const STEP_SPECS: [StaticSetupStep; 6] = [
         id: SetupStep::OperateFleet,
         title_id: MessageId::SetupStepOperateFleetTitle,
         why_id: MessageId::SetupStepOperateFleetWhy,
+        required: false,
+    },
+    StaticSetupStep {
+        id: SetupStep::Hotbar,
+        title_id: MessageId::SetupStepHotbarTitle,
+        why_id: MessageId::SetupStepHotbarWhy,
         required: false,
     },
     StaticSetupStep {
@@ -176,6 +182,9 @@ struct SetupRuntimeFacts {
     fleet_roster_result: String,
     operate_concurrency_result: String,
     operate_result: String,
+    hotbar_bindings_result: String,
+    hotbar_actions_result: String,
+    hotbar_result: String,
     default_mode: String,
     approval_policy_value: String,
     project_override_warning: Option<String>,
@@ -209,6 +218,9 @@ impl Default for SetupRuntimeFacts {
             fleet_roster_result: "Fleet roster not loaded".to_string(),
             operate_concurrency_result: "concurrency not loaded".to_string(),
             operate_result: "operate readiness not loaded".to_string(),
+            hotbar_bindings_result: "Hotbar config not loaded".to_string(),
+            hotbar_actions_result: "Hotbar actions not loaded".to_string(),
+            hotbar_result: "hotbar not loaded".to_string(),
             default_mode: "agent".to_string(),
             approval_policy_value: "on-request".to_string(),
             project_override_warning: None,
@@ -354,6 +366,29 @@ impl SetupRuntimeFacts {
             },
             operate_concurrency_result
         );
+        let known_hotbar_action_ids = app
+            .hotbar_actions
+            .iter()
+            .map(|action| action.id())
+            .collect::<Vec<_>>();
+        let hotbar_resolution = config.resolve_hotbar_bindings(&known_hotbar_action_ids);
+        let configured_hotbar_slots = config.hotbar.as_ref().map_or(0, Vec::len);
+        let hotbar_state = match config.hotbar.as_ref() {
+            None => "hidden",
+            Some(bindings) if bindings.is_empty() => "disabled",
+            Some(_) => "customized",
+        };
+        let active_hotbar_slots = hotbar_resolution.bindings.len();
+        let hotbar_warning_count = hotbar_resolution.warnings.len();
+        let hotbar_bindings_result = format!(
+            "{hotbar_state}; configured_slots={configured_hotbar_slots}; active_slots={active_hotbar_slots}; warnings={hotbar_warning_count}"
+        );
+        let hotbar_actions_result =
+            format!("{} bindable actions registered", app.hotbar_actions.len());
+        let hotbar_result = format!(
+            "state={hotbar_state}, configured_slots={configured_hotbar_slots}, active_slots={active_hotbar_slots}, actions={}, warnings={hotbar_warning_count}",
+            app.hotbar_actions.len()
+        );
         let constitution_autonomy = UserConstitution::load()
             .ok()
             .and_then(|load| {
@@ -388,6 +423,9 @@ impl SetupRuntimeFacts {
             fleet_roster_result,
             operate_concurrency_result,
             operate_result,
+            hotbar_bindings_result,
+            hotbar_actions_result,
+            hotbar_result,
             default_mode: app.mode.as_setting().to_string(),
             approval_policy_value: config
                 .approval_policy
@@ -1360,6 +1398,21 @@ impl SetupWizardView {
         })
     }
 
+    fn commit_hotbar_review(&mut self) -> ViewAction {
+        let mut state = self.state.clone();
+        state.set_step(
+            SetupStep::Hotbar,
+            StepEntry::new(StepStatus::Verified, false, CONSTITUTION_CHECKPOINT_VERSION)
+                .with_result(self.facts.hotbar_result.clone()),
+        );
+        self.state = state.clone();
+        self.move_next();
+        ViewAction::Emit(ViewEvent::SetupStateCommitRequested {
+            state,
+            message: tr(self.locale, MessageId::SetupHotbarReviewed).to_string(),
+        })
+    }
+
     fn select_runtime_preset(&mut self, key: char) -> ViewAction {
         if let Some(preset) = SetupRuntimePreset::from_key(key)
             && preset != self.runtime_preset
@@ -1732,6 +1785,9 @@ impl ModalView for SetupWizardView {
             KeyCode::Char('f') if self.selected_step() == SetupStep::OperateFleet => {
                 ViewAction::EmitAndClose(ViewEvent::SetupOpenFleetRequested)
             }
+            KeyCode::Char('h') if self.selected_step() == SetupStep::Hotbar => {
+                ViewAction::EmitAndClose(ViewEvent::SetupOpenHotbarRequested)
+            }
             KeyCode::Char('m') if self.selected_step() == SetupStep::TrustSandbox => {
                 ViewAction::EmitAndClose(ViewEvent::SetupOpenModeRequested)
             }
@@ -1773,6 +1829,9 @@ impl ModalView for SetupWizardView {
             }
             KeyCode::Enter if self.selected_step() == SetupStep::OperateFleet => {
                 self.commit_operate_fleet_review()
+            }
+            KeyCode::Enter if self.selected_step() == SetupStep::Hotbar => {
+                self.commit_hotbar_review()
             }
             KeyCode::Enter if self.selected_step() == SetupStep::Verification => {
                 self.commit_setup_report()
@@ -1876,6 +1935,11 @@ impl ModalView for SetupWizardView {
                 "F",
                 tr(self.locale, MessageId::SetupActionFleet).to_string(),
             ));
+        } else if self.selected_step() == SetupStep::Hotbar {
+            hints.push(ActionHint::new(
+                "H",
+                tr(self.locale, MessageId::SetupActionHotbar).to_string(),
+            ));
         } else if self.selected_step() == SetupStep::TrustSandbox {
             hints.push(ActionHint::new(
                 "1-3",
@@ -1969,6 +2033,7 @@ impl SetupWizardView {
             SetupStep::TrustSandbox => self.runtime_posture_detail_lines(),
             SetupStep::Constitution => self.constitution_detail_lines(),
             SetupStep::OperateFleet => self.operate_fleet_detail_lines(),
+            SetupStep::Hotbar => self.hotbar_detail_lines(),
             SetupStep::Verification => self.verification_detail_lines(),
             _ => Vec::new(),
         }
@@ -2175,6 +2240,23 @@ impl SetupWizardView {
             self.detail_row(MessageId::SetupOperateReadinessLabel, &readiness),
             Line::from(Span::styled(
                 tr(self.locale, MessageId::SetupOperateReviewHint).to_string(),
+                Style::default().fg(palette::TEXT_MUTED),
+            )),
+        ]
+    }
+
+    fn hotbar_detail_lines(&self) -> Vec<Line<'static>> {
+        vec![
+            self.detail_row(
+                MessageId::SetupHotbarBindingsLabel,
+                &self.facts.hotbar_bindings_result,
+            ),
+            self.detail_row(
+                MessageId::SetupHotbarActionsLabel,
+                &self.facts.hotbar_actions_result,
+            ),
+            Line::from(Span::styled(
+                tr(self.locale, MessageId::SetupHotbarReviewHint).to_string(),
                 Style::default().fg(palette::TEXT_MUTED),
             )),
         ]
@@ -2810,7 +2892,7 @@ mod tests {
     }
 
     #[test]
-    fn visible_release_rail_skips_optional_placeholder_steps() {
+    fn visible_release_rail_includes_supported_optional_steps() {
         let steps = STEP_SPECS.iter().map(|step| step.id()).collect::<Vec<_>>();
 
         assert_eq!(
@@ -2821,6 +2903,7 @@ mod tests {
                 SetupStep::TrustSandbox,
                 SetupStep::Constitution,
                 SetupStep::OperateFleet,
+                SetupStep::Hotbar,
                 SetupStep::Verification,
             ]
         );
@@ -3065,6 +3148,23 @@ mod tests {
         assert!(matches!(
             fleet_action,
             ViewAction::EmitAndClose(ViewEvent::SetupOpenFleetRequested)
+        ));
+    }
+
+    #[test]
+    fn hotbar_step_hands_off_to_existing_hotbar_setup() {
+        let mut view = SetupWizardView::new_at_with_facts(
+            SetupState::default(),
+            Locale::En,
+            SetupStep::Hotbar,
+            SetupRuntimeFacts::default(),
+        );
+
+        let action = view.handle_key(key(KeyCode::Char('h')));
+
+        assert!(matches!(
+            action,
+            ViewAction::EmitAndClose(ViewEvent::SetupOpenHotbarRequested)
         ));
     }
 
@@ -4172,6 +4272,67 @@ mod tests {
             .expect("operate result");
         assert!(result.contains("plan limit not probed"), "{result}");
         assert!(message.contains("Operate/Fleet readiness recorded"));
+        assert_eq!(view.selected_step(), SetupStep::Hotbar);
+    }
+
+    #[test]
+    fn hotbar_detail_lines_show_read_only_config_facts() {
+        let facts = SetupRuntimeFacts {
+            hotbar_bindings_result: "customized; configured_slots=2; active_slots=2; warnings=0"
+                .to_string(),
+            hotbar_actions_result: "13 bindable actions registered".to_string(),
+            ..SetupRuntimeFacts::default()
+        };
+        let view = SetupWizardView::new_at_with_facts(
+            SetupState::default(),
+            Locale::En,
+            SetupStep::Hotbar,
+            facts,
+        );
+
+        let text = lines_to_text(view.hotbar_detail_lines());
+
+        assert!(text.contains("Hotbar bindings:"));
+        assert!(text.contains("configured_slots=2"));
+        assert!(text.contains("Bindable actions:"));
+        assert!(text.contains("13 bindable actions"));
+        assert!(text.contains("without changing config"));
+    }
+
+    #[test]
+    fn hotbar_review_records_optional_snapshot() {
+        let facts = SetupRuntimeFacts {
+            hotbar_result:
+                "state=customized, configured_slots=2, active_slots=2, actions=13, warnings=0"
+                    .to_string(),
+            ..SetupRuntimeFacts::default()
+        };
+        let mut view = SetupWizardView::new_at_with_facts(
+            SetupState::default(),
+            Locale::En,
+            SetupStep::Hotbar,
+            facts,
+        );
+
+        let action = view.handle_key(key(KeyCode::Enter));
+
+        let ViewAction::Emit(ViewEvent::SetupStateCommitRequested { state, message }) = action
+        else {
+            panic!("expected setup-state commit event");
+        };
+        assert_eq!(state.status(SetupStep::Hotbar), StepStatus::Verified);
+        let entry = state
+            .steps
+            .get(&SetupStep::Hotbar)
+            .expect("hotbar setup entry");
+        assert!(!entry.required);
+        assert!(
+            entry
+                .result
+                .as_deref()
+                .is_some_and(|result| result.contains("state=customized"))
+        );
+        assert!(message.contains("Hotbar setup state recorded"));
         assert_eq!(view.selected_step(), SetupStep::Verification);
     }
 

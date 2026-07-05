@@ -427,8 +427,11 @@
     "VoiceProcessing": "🎙 Đang chuyển thành văn bản...",
     "VoiceTranscribed": "🎙 Đã chuyển xong",
     "SetupActionFleet": "thiết lập Fleet",
+    "SetupActionHotbar": "thiết lập Hotbar",
     "SetupStepOperateFleetTitle": "Operate và Fleet",
     "SetupStepOperateFleetWhy": "Xem lại liệu công việc nhiều worker bền vững có thể chạy với nhà cung cấp, tư thế runtime, roster và cấu hình đồng thời hiện tại hay không. Việc phát hiện giới hạn gói vẫn là thao tác rõ ràng.",
+    "SetupStepHotbarTitle": "Hotbar",
+    "SetupStepHotbarWhy": "Cấu hình phím tắt tuyến và lệnh thường dùng sau khi luồng setup cốt lõi đã an toàn.",
     "SetupOperateRuntimeLabel": "Runtime worker:",
     "SetupOperateRosterLabel": "Roster Fleet:",
     "SetupOperateConcurrencyLabel": "Đồng thời:",
@@ -436,6 +439,10 @@
     "SetupOperateReviewHint": "Enter ghi lại các dữ kiện Operate/Fleet hiện tại. Không dò giới hạn gói, không ghi thông tin xác thực, không đổi cấu hình Fleet.",
     "SetupOperateReviewed": "Đã ghi mức sẵn sàng Operate/Fleet.",
     "SetupOperateNeedsActionSaved": "Operate/Fleet vẫn cần hành động; đã ghi vào báo cáo setup.",
+    "SetupHotbarBindingsLabel": "Ràng buộc Hotbar:",
+    "SetupHotbarActionsLabel": "Hành động có thể gán:",
+    "SetupHotbarReviewHint": "Nhấn H để tùy chỉnh slot Hotbar; Enter ghi trạng thái Hotbar tùy chọn hiện tại mà không đổi cấu hình.",
+    "SetupHotbarReviewed": "Đã ghi trạng thái setup Hotbar.",
     "SetupReportOperateLabel": "Operate/Fleet:",
     "SetupReportNextActionOperate": "Xem lại mức sẵn sàng Operate/Fleet trước các lượt chạy nhiều worker bền vững."
 }

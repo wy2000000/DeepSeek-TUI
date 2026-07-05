@@ -162,8 +162,11 @@
     "VoiceProcessing": "🎙 正在轉錄...",
     "VoiceTranscribed": "🎙 轉錄完成",
     "SetupActionFleet": "Fleet 設定",
+    "SetupActionHotbar": "Hotbar 設定",
     "SetupStepOperateFleetTitle": "Operate 與 Fleet",
     "SetupStepOperateFleetWhy": "檢視目前供應商、執行姿態、成員表與並行設定是否能支撐持久多 worker 工作。方案限制偵測仍需明確操作。",
+    "SetupStepHotbarTitle": "Hotbar",
+    "SetupStepHotbarWhy": "核心設定路徑安全後，再設定常用路線與指令捷徑。",
     "SetupOperateRuntimeLabel": "Worker 執行時：",
     "SetupOperateRosterLabel": "Fleet 成員表：",
     "SetupOperateConcurrencyLabel": "並行：",
@@ -171,6 +174,10 @@
     "SetupOperateReviewHint": "按 Enter 記錄目前 Operate/Fleet 事實。不會偵測方案限制、寫入憑證或更改 Fleet 設定。",
     "SetupOperateReviewed": "已記錄 Operate/Fleet 就緒狀態。",
     "SetupOperateNeedsActionSaved": "Operate/Fleet 仍需操作；已記錄到設定報告。",
+    "SetupHotbarBindingsLabel": "Hotbar 綁定：",
+    "SetupHotbarActionsLabel": "可綁定操作：",
+    "SetupHotbarReviewHint": "按 H 自訂 Hotbar 槽位；按 Enter 記錄目前可選 Hotbar 狀態，不更改設定。",
+    "SetupHotbarReviewed": "已記錄 Hotbar 設定狀態。",
     "SetupReportOperateLabel": "Operate/Fleet：",
     "SetupReportNextActionOperate": "在持久多 worker 執行前檢視 Operate/Fleet 就緒狀態。"
 }

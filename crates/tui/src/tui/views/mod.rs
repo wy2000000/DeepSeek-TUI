@@ -691,6 +691,9 @@ pub enum ViewEvent {
     /// Emitted by the setup Operate/Fleet readiness card to hand off to the
     /// existing Fleet setup wizard without writing Fleet config itself.
     SetupOpenFleetRequested,
+    /// Emitted by the setup Hotbar card to hand off to the existing Hotbar
+    /// setup wizard without rewriting bindings itself.
+    SetupOpenHotbarRequested,
     /// Emitted by the setup Runtime Posture card to hand off to the existing
     /// work-mode picker.
     SetupOpenModeRequested,

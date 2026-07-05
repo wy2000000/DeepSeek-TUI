@@ -47,18 +47,18 @@ pub enum SetupStep {
     ProviderModel,
     /// Trust, approvals, sandbox, network — runtime posture (#3406).
     TrustSandbox,
-    /// Tools / MCP / skills / plugins (later lanes; tracked for completeness).
-    ToolsMcp,
-    /// Hotbar opt-in (v0.8.68 lane; tracked for completeness).
-    Hotbar,
-    /// Remote / mobile runtime (v0.8.69+ lane; tracked for completeness).
-    RemoteRuntime,
     /// User-global constitution choice / checkpoint.
     Constitution,
     /// Operate/Fleet readiness: provider auth, worker runtime, roster, and
     /// concurrency review. Plan-limit detection remains a separate product
     /// decision; this step only records reviewed current facts.
     OperateFleet,
+    /// Hotbar shortcuts are optional, but now have a first-class setup card.
+    Hotbar,
+    /// Tools / MCP / skills / plugins (later lanes; tracked for completeness).
+    ToolsMcp,
+    /// Remote / mobile runtime (later lane; tracked for completeness).
+    RemoteRuntime,
     /// Final verification / doctor / ready summary.
     Verification,
 }
@@ -69,11 +69,11 @@ impl SetupStep {
         SetupStep::Language,
         SetupStep::ProviderModel,
         SetupStep::TrustSandbox,
-        SetupStep::ToolsMcp,
-        SetupStep::Hotbar,
-        SetupStep::RemoteRuntime,
         SetupStep::Constitution,
         SetupStep::OperateFleet,
+        SetupStep::Hotbar,
+        SetupStep::ToolsMcp,
+        SetupStep::RemoteRuntime,
         SetupStep::Verification,
     ];
 }
