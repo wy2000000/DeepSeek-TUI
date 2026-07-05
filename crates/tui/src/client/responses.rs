@@ -91,6 +91,8 @@ impl DeepSeekClient {
         // ChatGPT backend additionally requires the account id and the
         // experimental Responses beta opt-in.
         let account_id = crate::oauth::codex_account_id();
+        let request_body =
+            serde_json::to_vec(&body).context("Failed to serialize Responses API request body")?;
         let response = self
             .send_with_retry(|| {
                 let mut builder = self
@@ -103,7 +105,7 @@ impl DeepSeekClient {
                 if let Some(account_id) = &account_id {
                     builder = builder.header("chatgpt-account-id", account_id);
                 }
-                builder.json(&body)
+                builder.body(request_body.clone())
             })
             .await
             .context("Responses API request failed")?;

@@ -189,7 +189,7 @@ const ALLOW_INSECURE_HTTP_ENV: &str = "DEEPSEEK_ALLOW_INSECURE_HTTP";
 /// of committing to the full remaining window up front.
 const RATE_LIMIT_PAUSE_RECHECK_INTERVAL: Duration = Duration::from_millis(250);
 
-pub(super) const SSE_BACKPRESSURE_HIGH_WATERMARK: usize = 8 * 1024 * 1024; // 8 MB
+pub(super) const SSE_BACKPRESSURE_HIGH_WATERMARK: usize = 1024 * 1024; // 1 MB
 pub(super) const SSE_BACKPRESSURE_SLEEP_MS: u64 = 10;
 pub(super) const SSE_MAX_LINES_PER_CHUNK: usize = 256;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1110,9 +1110,7 @@ impl DeepSeekClient {
         });
         apply_reasoning_effort(&mut body, Some("off"), self.api_provider);
 
-        let response = self
-            .send_with_retry(|| self.http_client.post(&url).json(&body))
-            .await?;
+        let response = self.send_json_with_retry(&url, &body).await?;
 
         let value: serde_json::Value = response.json().await?;
         let translated = value["choices"][0]["message"]["content"]
@@ -1331,9 +1329,7 @@ impl DeepSeekClient {
         let body = build_speech_synthesis_body(&model, &text, instruction, audio);
 
         let url = api_url(&self.base_url, "chat/completions");
-        let response = self
-            .send_with_retry(|| self.http_client.post(&url).json(&body))
-            .await?;
+        let response = self.send_json_with_retry(&url, &body).await?;
         let status = response.status();
         if !status.is_success() {
             let raw_error_text = bounded_error_text(response, ERROR_BODY_MAX_BYTES).await;
@@ -1505,6 +1501,22 @@ impl DeepSeekClient {
                 Err(anyhow::Error::new(err.last_error))
             }
         }
+    }
+
+    pub(super) async fn send_json_with_retry(
+        &self,
+        url: &str,
+        body: &serde_json::Value,
+    ) -> Result<reqwest::Response> {
+        let request_body =
+            serde_json::to_vec(body).context("Failed to serialize JSON request body")?;
+        self.send_with_retry(|| {
+            self.http_client
+                .post(url)
+                .header(CONTENT_TYPE, "application/json")
+                .body(request_body.clone())
+        })
+        .await
     }
 }
 
@@ -1991,9 +2003,7 @@ impl DeepSeekClient {
             "suffix": suffix,
             "max_tokens": max_tokens,
         });
-        let response = self
-            .send_with_retry(|| self.http_client.post(&url).json(&body))
-            .await?;
+        let response = self.send_json_with_retry(&url, &body).await?;
         let status = response.status();
         if !status.is_success() {
             let raw_error_text = bounded_error_text(response, ERROR_BODY_MAX_BYTES).await;

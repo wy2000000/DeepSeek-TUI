@@ -2802,7 +2802,7 @@ impl Engine {
             Ok(result) => {
                 if !result.messages.is_empty() || self.session.messages.is_empty() {
                     let messages_after = result.messages.len();
-                    self.session.messages = result.messages.into();
+                    self.session.replace_messages(result.messages);
                     self.merge_compaction_summary(result.summary_prompt);
                     self.emit_session_updated().await;
                     let removed = messages_before.saturating_sub(messages_after);
@@ -2898,7 +2898,7 @@ impl Engine {
         {
             Ok(result) => {
                 let messages_after = result.messages.len();
-                self.session.messages = result.messages.into();
+                self.session.replace_messages(result.messages);
                 self.emit_session_updated().await;
 
                 let summary = format!(
@@ -3024,7 +3024,7 @@ impl Engine {
         }
 
         if !compacted_messages.is_empty() || self.session.messages.is_empty() {
-            self.session.messages = compacted_messages.into();
+            self.session.replace_messages(compacted_messages);
         }
         self.merge_compaction_summary(summary_prompt);
 

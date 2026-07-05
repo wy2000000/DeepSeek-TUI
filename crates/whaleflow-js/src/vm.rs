@@ -14,19 +14,37 @@
 //! deterministic for replay.
 
 use std::cell::Cell;
+use std::env;
 use std::rc::Rc;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use rquickjs::function::{Async, Func};
 use rquickjs::{AsyncContext, AsyncRuntime, CatchResultExt, CaughtError, Ctx, Promise, Value};
 use serde::Deserialize;
-use tokio::sync::{oneshot, watch};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot, watch};
 
 use crate::driver::{ProgressEvent, TaskCompletion, TaskRequest, WorkflowDriver};
 use crate::error::WhaleflowJsError;
 use crate::schema::{compile_schema, decode_reply};
 use crate::{PARALLEL_MAX_ITEMS, WHALEFLOW_LIFETIME_CAP, normalize_profile};
+
+const DEFAULT_VM_MEMORY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
+const MIN_VM_MEMORY_LIMIT_BYTES: usize = 4 * 1024 * 1024;
+const MAX_VM_MEMORY_LIMIT_BYTES: usize = 512 * 1024 * 1024;
+const DEFAULT_VM_STACK_BYTES: usize = 1024 * 1024;
+const MIN_VM_STACK_BYTES: usize = 128 * 1024;
+const MAX_VM_STACK_BYTES: usize = 8 * 1024 * 1024;
+const DEFAULT_VM_THREAD_STACK_BYTES: usize = 2 * 1024 * 1024;
+const MIN_VM_THREAD_STACK_BYTES: usize = 512 * 1024;
+const MAX_VM_THREAD_STACK_BYTES: usize = 16 * 1024 * 1024;
+const DEFAULT_MAX_CONCURRENT_VMS: usize = 4;
+const MAX_CONCURRENT_VMS: usize = 256;
+
+const VM_MEMORY_LIMIT_MB_ENV: &str = "CODEWHALE_WHALEFLOW_JS_MEMORY_LIMIT_MB";
+const VM_STACK_KB_ENV: &str = "CODEWHALE_WHALEFLOW_JS_STACK_KB";
+const VM_THREAD_STACK_KB_ENV: &str = "CODEWHALE_WHALEFLOW_JS_THREAD_STACK_KB";
+const VM_MAX_CONCURRENT_ENV: &str = "CODEWHALE_WHALEFLOW_JS_MAX_CONCURRENT";
 
 /// Resource limits applied to the QuickJS runtime before any script runs.
 ///
@@ -34,7 +52,7 @@ use crate::{PARALLEL_MAX_ITEMS, WHALEFLOW_LIFETIME_CAP, normalize_profile};
 /// the run future, or the driver's cancel cascade) is the deadline mechanism.
 #[derive(Debug, Clone, Copy)]
 pub struct VmLimits {
-    /// QuickJS heap ceiling in bytes (default 64 MiB).
+    /// QuickJS heap ceiling in bytes (default 32 MiB).
     pub memory_limit_bytes: usize,
     /// Maximum interpreter stack in bytes (default 1 MiB).
     pub max_stack_bytes: usize,
@@ -42,11 +60,61 @@ pub struct VmLimits {
 
 impl Default for VmLimits {
     fn default() -> Self {
+        Self::from_env()
+    }
+}
+
+impl VmLimits {
+    pub fn from_env() -> Self {
         Self {
-            memory_limit_bytes: 64 * 1024 * 1024,
-            max_stack_bytes: 1024 * 1024,
+            memory_limit_bytes: env_usize_bytes(
+                VM_MEMORY_LIMIT_MB_ENV,
+                1024 * 1024,
+                MIN_VM_MEMORY_LIMIT_BYTES,
+                MAX_VM_MEMORY_LIMIT_BYTES,
+                DEFAULT_VM_MEMORY_LIMIT_BYTES,
+            ),
+            max_stack_bytes: env_usize_bytes(
+                VM_STACK_KB_ENV,
+                1024,
+                MIN_VM_STACK_BYTES,
+                MAX_VM_STACK_BYTES,
+                DEFAULT_VM_STACK_BYTES,
+            ),
         }
     }
+}
+
+fn env_usize_bytes(name: &str, unit: usize, min: usize, max: usize, default: usize) -> usize {
+    env::var(name)
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .and_then(|value| value.checked_mul(unit))
+        .map(|bytes| bytes.clamp(min, max))
+        .unwrap_or(default)
+}
+
+fn max_concurrent_vms() -> usize {
+    env::var(VM_MAX_CONCURRENT_ENV)
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .map(|value| value.clamp(1, MAX_CONCURRENT_VMS))
+        .unwrap_or(DEFAULT_MAX_CONCURRENT_VMS)
+}
+
+fn vm_thread_stack_bytes() -> usize {
+    env_usize_bytes(
+        VM_THREAD_STACK_KB_ENV,
+        1024,
+        MIN_VM_THREAD_STACK_BYTES,
+        MAX_VM_THREAD_STACK_BYTES,
+        DEFAULT_VM_THREAD_STACK_BYTES,
+    )
+}
+
+fn vm_admission() -> &'static Arc<Semaphore> {
+    static ADMISSION: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    ADMISSION.get_or_init(|| Arc::new(Semaphore::new(max_concurrent_vms())))
 }
 
 /// Executes WhaleFlow scripts, one isolated QuickJS runtime per run.
@@ -101,13 +169,20 @@ impl WhaleflowVm {
             armed: true,
         };
 
+        let permit = vm_admission()
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| WhaleflowJsError::VmInit("VM admission gate closed".to_string()))?;
         let limits = self.limits;
         let source = source.to_string();
         let thread_driver = driver.clone();
         let thread_cancel = cancel.clone();
         let spawned = std::thread::Builder::new()
             .name("whaleflow-js-vm".to_string())
+            .stack_size(vm_thread_stack_bytes())
             .spawn(move || {
+                let _permit: OwnedSemaphorePermit = permit;
                 let outcome = vm_thread_main(
                     source,
                     args_json,
@@ -231,9 +306,12 @@ async fn run_in_vm(
         .await
         .map_err(|err| WhaleflowJsError::VmInit(err.to_string()))?;
 
-    context
+    let result = context
         .async_with(async |ctx| run_in_ctx(ctx, source, args_json, driver, cancel).await)
-        .await
+        .await;
+    drop(context);
+    runtime.run_gc().await;
+    result
 }
 
 async fn run_in_ctx(
