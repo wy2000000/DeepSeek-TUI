@@ -7,7 +7,7 @@ pub(super) const TOOL_HEADER_SUMMARY_LIMIT: usize = 56;
 pub(super) const TOOL_OUTPUT_HEAD_LINES: usize = 2;
 pub(super) const TOOL_OUTPUT_TAIL_LINES: usize = 2;
 #[cfg(test)]
-pub(super) const TOOL_RUNNING_SYMBOLS: [&str; 10] = crate::tui::spinner::BRAILLE_SPINNER_FRAMES;
+pub(super) const TOOL_RUNNING_SYMBOLS: [&str; 12] = crate::tui::spinner::BRAILLE_SPINNER_FRAMES;
 #[cfg(test)]
 pub(super) const TOOL_STATUS_SYMBOL_MS: u64 = crate::tui::spinner::BRAILLE_SPINNER_FRAME_MS;
 /// Visual marker for the user role at the start of their message line. Solid

@@ -1301,6 +1301,22 @@ pub enum CompletionSound {
     File,
 }
 
+/// Controls when per-subagent completion notifications fire during fleet /
+/// workflow runs. Turn-completion notifications are unaffected.
+#[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SubagentCompletionNotification {
+    /// Notify on every subagent completion.
+    Always,
+    /// Notify only when the last subagent in a batch finishes — no other
+    /// subagents running and no workflow run in progress. Default: stays quiet
+    /// mid-run and fires once when the fleet drains.
+    #[default]
+    FinalOnly,
+    /// Never fire a subagent-completion notification.
+    Off,
+}
+
 /// Desktop-notification configuration (OSC 9 / BEL on turn completion).
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct NotificationsConfig {
@@ -1320,6 +1336,13 @@ pub struct NotificationsConfig {
     /// Default: `false`.
     #[serde(default)]
     pub include_summary: bool,
+
+    /// When to fire per-subagent completion notifications during fleet /
+    /// workflow runs: `always` | `final-only` | `off`. Default: `final-only`
+    /// (quiet mid-run, one notification when the batch drains). Set `off` to
+    /// silence subagent notifications entirely.
+    #[serde(default)]
+    pub subagent_completion: SubagentCompletionNotification,
 
     /// Completion sound: `"off"` | `"beep"` | `"bell"` | `"file"`. Default: `"beep"`.
     /// Plays a sound when every turn finishes (alongside the ✅ marker).

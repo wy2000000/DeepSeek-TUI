@@ -179,9 +179,9 @@ const TURN_STALL_WATCHDOG_GRACE: Duration = Duration::from_secs(30);
 const TOOL_HANG_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(900);
 // Forced repaint cadence while a turn is live (model loading, compacting,
 // sub-agents running). Drives the footer water-spout animation as well as
-// the per-tool spinner pulse — keep this fast enough that the spout reads as
-// motion (~12 fps) instead of teleport-frames.
-const UI_STATUS_ANIMATION_MS: u64 = 80;
+// the per-tool spinner pulse — keep this fast enough that the whale-spout
+// braille pattern reads as continuous motion instead of teleport-frames.
+const UI_STATUS_ANIMATION_MS: u64 = crate::tui::spinner::BRAILLE_SPINNER_FRAME_MS;
 pub(crate) const SIDEBAR_VISIBLE_MIN_WIDTH: u16 = 64;
 const DEFAULT_TERMINAL_PROBE_TIMEOUT_MS: u64 = 500;
 const PERIODIC_FULL_REPAINT_EVERY_N: u64 = 50;
@@ -3038,9 +3038,15 @@ async fn run_event_loop(
                         ));
                         let should_recapture_terminal =
                             !has_other_running_subagents && app.use_alt_screen;
-                        if !has_other_running_subagents
-                            && let Some((method, threshold, include_summary)) =
-                                notifications::settings(config)
+                        let subagent_notification_mode =
+                            config.notifications_config().subagent_completion;
+                        let workflow_tool_running = workflow_tool_is_running(app);
+                        if should_notify_subagent_completion(
+                            subagent_notification_mode,
+                            has_other_running_subagents,
+                            workflow_tool_running,
+                        ) && let Some((method, threshold, include_summary)) =
+                            notifications::settings(config)
                         {
                             let in_tmux = std::env::var("TMUX").is_ok_and(|v| !v.is_empty());
                             let msg = notifications::subagent_completion_message(
@@ -3402,9 +3408,15 @@ async fn run_event_loop(
         if reconcile_turn_liveness(app, Instant::now(), has_running_agents) {
             app.needs_redraw = true;
         }
-        if (app.is_loading || has_running_agents || app.is_compacting || app.is_purging)
-            && last_status_frame.elapsed()
-                >= Duration::from_millis(status_animation_interval_ms(app))
+        let history_has_live_motion = history_has_live_motion(&app.history);
+        let active_cell_has_live_motion = active_cell_has_live_motion(app);
+        if should_tick_status_animation(
+            app,
+            has_running_agents,
+            history_has_live_motion,
+            active_cell_has_live_motion,
+        ) && last_status_frame.elapsed()
+            >= Duration::from_millis(status_animation_interval_ms(app))
         {
             if streaming_thinking::animate_pending_translation(
                 app,
@@ -3412,7 +3424,7 @@ async fn run_event_loop(
             ) {
                 app.mark_history_updated();
             }
-            if !app.low_motion && history_has_live_motion(&app.history) {
+            if !app.low_motion && (history_has_live_motion || active_cell_has_live_motion) {
                 app.mark_history_updated();
             }
             app.needs_redraw = true;
@@ -11918,26 +11930,70 @@ fn clamp_event_poll_timeout(timeout: Duration) -> Duration {
     timeout.max(MIN_EVENT_POLL_TIMEOUT)
 }
 
+/// True while a `workflow` tool is executing in the foreground (active cell)
+/// or still shown as running in history. Used to keep per-subagent completion
+/// notifications quiet during a workflow run under `final-only`.
+fn workflow_tool_is_running(app: &App) -> bool {
+    fn is_running_workflow(cell: &HistoryCell) -> bool {
+        matches!(
+            cell,
+            HistoryCell::Tool(ToolCell::Generic(tool))
+                if tool.name == "workflow" && tool.status == ToolStatus::Running
+        )
+    }
+    app.history.iter().any(is_running_workflow)
+        || app
+            .active_cell
+            .as_ref()
+            .is_some_and(|active| active.entries().iter().any(is_running_workflow))
+}
+
+/// Decide whether an `AgentComplete` event should fire a subagent-completion
+/// desktop notification, per the `[notifications].subagent_completion` mode.
+/// `settings()` still has the final say (method=off / condition=never).
+fn should_notify_subagent_completion(
+    mode: crate::config::SubagentCompletionNotification,
+    has_other_running_subagents: bool,
+    workflow_tool_running: bool,
+) -> bool {
+    use crate::config::SubagentCompletionNotification as Mode;
+    match mode {
+        Mode::Off => false,
+        Mode::Always => true,
+        Mode::FinalOnly => !has_other_running_subagents && !workflow_tool_running,
+    }
+}
+
+fn should_tick_status_animation(
+    app: &App,
+    has_running_agents: bool,
+    history_has_live_motion: bool,
+    active_cell_has_live_motion: bool,
+) -> bool {
+    app.is_loading
+        || has_running_agents
+        || app.is_compacting
+        || app.is_purging
+        || history_has_live_motion
+        || active_cell_has_live_motion
+}
+
+fn active_cell_has_live_motion(app: &App) -> bool {
+    app.active_cell.as_ref().is_some_and(|active| {
+        active.entries().iter().any(|cell| match cell {
+            HistoryCell::Thinking { streaming, .. } => *streaming,
+            HistoryCell::Tool(tool) => tool_cell_is_running(tool),
+            _ => false,
+        })
+    })
+}
+
 fn history_has_live_motion(history: &[HistoryCell]) -> bool {
     use crate::tui::history::SubAgentCell;
     use crate::tui::widgets::agent_card::AgentLifecycle;
     history.iter().any(|cell| match cell {
         HistoryCell::Thinking { streaming, .. } => *streaming,
-        HistoryCell::Tool(tool) => match tool {
-            ToolCell::Exec(cell) => cell.status == ToolStatus::Running,
-            ToolCell::Exploring(cell) => cell
-                .entries
-                .iter()
-                .any(|entry| entry.status == ToolStatus::Running),
-            ToolCell::PlanUpdate(cell) => cell.status == ToolStatus::Running,
-            ToolCell::PatchSummary(cell) => cell.status == ToolStatus::Running,
-            ToolCell::Review(cell) => cell.status == ToolStatus::Running,
-            ToolCell::DiffPreview(_) => false,
-            ToolCell::Mcp(cell) => cell.status == ToolStatus::Running,
-            ToolCell::ViewImage(_) => false,
-            ToolCell::WebSearch(cell) => cell.status == ToolStatus::Running,
-            ToolCell::Generic(cell) => cell.status == ToolStatus::Running,
-        },
+        HistoryCell::Tool(tool) => tool_cell_is_running(tool),
         HistoryCell::SubAgent(SubAgentCell::Delegate(card)) => matches!(
             card.status,
             AgentLifecycle::Pending | AgentLifecycle::Running
@@ -12856,7 +12912,7 @@ fn version_hint_from_latest_tag(tag: &str, current: &str) -> Option<String> {
     }
 
     Some(format!(
-        "v{latest} available - run `codewhale update` and restart"
+        "v{latest} available - run `codewhale update` and restart, then /change for what's new"
     ))
 }
 

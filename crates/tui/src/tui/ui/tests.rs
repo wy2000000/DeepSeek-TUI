@@ -11626,6 +11626,7 @@ fn notification_settings_tui_always_keeps_configured_method_no_threshold() {
             completion_sound: crate::config::CompletionSound::Beep,
             sound_file: None,
             include_summary: true,
+            subagent_completion: crate::config::SubagentCompletionNotification::default(),
         }),
         ..Config::default()
     };
@@ -11659,6 +11660,7 @@ fn notification_settings_no_tui_override_uses_notifications_block() {
             completion_sound: crate::config::CompletionSound::Beep,
             sound_file: None,
             include_summary: false,
+            subagent_completion: crate::config::SubagentCompletionNotification::default(),
         }),
         ..Config::default()
     };
@@ -12236,6 +12238,111 @@ fn throttled_progress_event_does_not_cancel_other_events_redraw() {
         !received_engine_event,
         "a lone throttled progress event must not trigger a repaint"
     );
+}
+
+fn running_generic_tool_cell(name: &str) -> HistoryCell {
+    HistoryCell::Tool(ToolCell::Generic(GenericToolCell {
+        name: name.to_string(),
+        status: ToolStatus::Running,
+        input_summary: Some("action: run".to_string()),
+        output: None,
+        prompts: None,
+        spillover_path: None,
+        output_summary: None,
+        is_diff: false,
+    }))
+}
+
+#[test]
+fn status_animation_ticks_for_lone_running_history_tool() {
+    let mut app = create_test_app();
+    app.history.push(running_generic_tool_cell("workflow"));
+
+    let history_motion = history_has_live_motion(&app.history);
+    let active_motion = active_cell_has_live_motion(&app);
+
+    assert!(
+        history_motion,
+        "running workflow tool should count as live motion"
+    );
+    assert!(
+        should_tick_status_animation(&app, false, history_motion, active_motion),
+        "a lone running tool in history must force timed redraws for the spout"
+    );
+}
+
+#[test]
+fn status_animation_ticks_for_lone_running_active_tool() {
+    let mut app = create_test_app();
+    let mut active = ActiveCell::new();
+    active.push_tool("tool-1", running_generic_tool_cell("exec_shell"));
+    app.active_cell = Some(active);
+
+    let history_motion = history_has_live_motion(&app.history);
+    let active_motion = active_cell_has_live_motion(&app);
+
+    assert!(
+        active_motion,
+        "running active-cell tool should count as live motion"
+    );
+    assert!(
+        should_tick_status_animation(&app, false, history_motion, active_motion),
+        "a lone running active tool must force timed redraws for the spout"
+    );
+}
+
+#[test]
+fn status_animation_stays_idle_without_live_motion() {
+    let app = create_test_app();
+
+    assert!(!history_has_live_motion(&app.history));
+    assert!(!active_cell_has_live_motion(&app));
+    assert!(
+        !should_tick_status_animation(&app, false, false, false),
+        "idle sessions should not wake the animation timer"
+    );
+}
+
+#[test]
+fn subagent_completion_notification_modes_gate_correctly() {
+    use crate::config::SubagentCompletionNotification as Mode;
+    // off: never notify.
+    assert!(!should_notify_subagent_completion(Mode::Off, false, false));
+    assert!(!should_notify_subagent_completion(Mode::Off, true, true));
+    // always: notify regardless of what else is running.
+    assert!(should_notify_subagent_completion(Mode::Always, true, true));
+    assert!(should_notify_subagent_completion(
+        Mode::Always,
+        false,
+        false
+    ));
+    // final-only: only when nothing else is running and no workflow is active.
+    assert!(should_notify_subagent_completion(
+        Mode::FinalOnly,
+        false,
+        false
+    ));
+    assert!(
+        !should_notify_subagent_completion(Mode::FinalOnly, true, false),
+        "final-only stays quiet while other subagents run"
+    );
+    assert!(
+        !should_notify_subagent_completion(Mode::FinalOnly, false, true),
+        "final-only stays quiet while a workflow run is active"
+    );
+}
+
+#[test]
+fn workflow_tool_is_running_detects_running_workflow_cell() {
+    let mut app = create_test_app();
+    assert!(!workflow_tool_is_running(&app));
+    app.history.push(running_generic_tool_cell("read_file"));
+    assert!(
+        !workflow_tool_is_running(&app),
+        "a non-workflow running tool must not count as a workflow run"
+    );
+    app.history.push(running_generic_tool_cell("workflow"));
+    assert!(workflow_tool_is_running(&app));
 }
 
 #[test]
