@@ -66,7 +66,11 @@ fn delegate_identity_fallback(cell: &GenericToolCell) -> String {
             }
         }
     }
-    "unknown child".to_string()
+    // #4148: never surface the raw internal fallback token ("unknown child")
+    // in the default transcript. When we can't resolve a concrete role, slug,
+    // or agent id, a friendly, non-leaky label reads best next to the
+    // "delegate" verb ("delegate running · subagent").
+    "subagent".to_string()
 }
 
 pub(super) fn extract_agent_id(output: &str) -> Option<&str> {

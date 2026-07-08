@@ -1958,7 +1958,14 @@ fn render_tool_header_with_family_and_summary(
         Span::styled(state_owned, tool_status_style(status)),
     ];
 
-    if let Some(summary) = summary.and_then(normalize_header_summary) {
+    // #4148: don't let the summary echo the verb it sits next to — an
+    // identity/summary that resolves to the family word itself would render a
+    // duplicate like "delegate · delegate". When the summary collapses to the
+    // verb, the verb already carries the signal, so drop the redundant tail.
+    if let Some(summary) = summary
+        .and_then(normalize_header_summary)
+        .filter(|summary| !summary.eq_ignore_ascii_case(verb))
+    {
         spans.push(Span::styled(" · ", Style::default().fg(palette::TEXT_DIM)));
         spans.push(Span::styled(
             truncate_text(&summary, TOOL_HEADER_SUMMARY_LIMIT),

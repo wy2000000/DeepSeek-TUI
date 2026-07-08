@@ -440,6 +440,67 @@ fn other_tools_are_unaffected_by_agent_compact_path() {
     assert_eq!(lines.len(), 1, "live tools should use compact rows");
 }
 
+#[test]
+fn agent_compact_header_omits_unknown_child_fallback() {
+    // #4148: an agent whose identity can't be resolved must not leak the raw
+    // internal "unknown child" token into the default transcript.
+    let cell = GenericToolCell {
+        name: "agent".to_string(),
+        status: ToolStatus::Running,
+        input_summary: Some("agent_type: delegate".to_string()),
+        output: None,
+        prompts: None,
+        spillover_path: None,
+        output_summary: None,
+        is_diff: false,
+    };
+    let rendered: String = cell.lines_with_mode(80, true, super::RenderMode::Live)[0]
+        .spans
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect();
+    assert!(
+        !rendered.contains("unknown child"),
+        "raw fallback token must not leak: {rendered:?}"
+    );
+    assert!(
+        rendered.contains("subagent"),
+        "friendly fallback label should be shown: {rendered:?}"
+    );
+}
+
+#[test]
+fn agent_compact_header_does_not_duplicate_delegate_verb() {
+    // #4148: when the resolved identity collapses to the "delegate" verb, the
+    // compact header must not render a redundant "delegate · delegate".
+    let cell = GenericToolCell {
+        name: "agent".to_string(),
+        status: ToolStatus::Running,
+        input_summary: Some("role: delegate".to_string()),
+        output: None,
+        prompts: None,
+        spillover_path: None,
+        output_summary: None,
+        is_diff: false,
+    };
+    let rendered: String = cell.lines_with_mode(80, true, super::RenderMode::Live)[0]
+        .spans
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect();
+    assert!(
+        !rendered.contains("delegate delegate"),
+        "no adjacent duplicate: {rendered:?}"
+    );
+    // The verb sits before the status; the redundant summary tail is dropped,
+    // so "delegate" appears exactly once.
+    assert_eq!(
+        rendered.matches("delegate").count(),
+        1,
+        "verb must not be echoed by the summary: {rendered:?}"
+    );
+}
+
 // ---- #403 concise todo / checklist update rendering ----
 //
 // The tool emits an "Updated todo #N to STATUS" leading line plus a
@@ -1841,6 +1902,62 @@ fn completed_short_thinking_without_summary_stays_visible_in_live_view() {
     assert!(
         !live_text.contains("Full reasoning in Ctrl+O"),
         "complete short reasoning should not need the detail affordance: {live_text}"
+    );
+}
+
+#[test]
+fn completed_reasoning_receipt_hides_internal_function_names_until_expanded() {
+    // #4146/#4148: a completed-reasoning receipt in the default (collapsed)
+    // transcript must not expose internal function names; the full body —
+    // identifiers intact — stays reachable on expand and in the transcript.
+    let cell = HistoryCell::Thinking {
+        content: "I will call refresh_catalog_cache to refresh the model list.".to_string(),
+        streaming: false,
+        duration_secs: Some(1.0),
+    };
+
+    // Default collapsed view: identifier scrubbed, prose preserved, and the
+    // expand affordance offered.
+    let collapsed = cell.lines_with_options(
+        80,
+        TranscriptRenderOptions {
+            low_motion: true,
+            ..TranscriptRenderOptions::default()
+        },
+    );
+    let collapsed_text = lines_text(&collapsed);
+    assert!(
+        !collapsed_text.contains("refresh_catalog_cache"),
+        "internal function name must not leak by default: {collapsed_text}"
+    );
+    assert!(
+        collapsed_text.contains("refresh the model list"),
+        "surrounding prose must still read: {collapsed_text}"
+    );
+    assert!(
+        collapsed_text.contains("Full reasoning in Ctrl+O"),
+        "collapsed receipt must offer the expand affordance: {collapsed_text}"
+    );
+
+    // Expanded view (Space toggles the fold relative to the default): the full
+    // identifier is restored.
+    let expanded = cell.lines_with_options_folded(
+        80,
+        TranscriptRenderOptions {
+            low_motion: true,
+            ..TranscriptRenderOptions::default()
+        },
+        true,
+    );
+    assert!(
+        lines_text(&expanded).contains("refresh_catalog_cache"),
+        "expanded reasoning must restore the full identifier"
+    );
+
+    // Transcript / pager / clipboard keeps the full, un-redacted body.
+    assert!(
+        lines_text(&cell.transcript_lines(80)).contains("refresh_catalog_cache"),
+        "transcript must keep the full identifier"
     );
 }
 

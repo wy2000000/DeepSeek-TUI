@@ -378,20 +378,24 @@ fn card_header(
     let header_color = status.color();
     let glyph_text = format!("{glyph} ");
     let status_text = format!("[{}]", status.label());
-    let fixed_width = [
-        glyph_text.as_str(),
-        verb,
-        " ",
-        role,
-        " ",
-        status_text.as_str(),
-        " ",
-    ]
-    .iter()
-    .map(|text| UnicodeWidthStr::width(*text))
-    .sum::<usize>();
+    // #4148: an `agent_type` that already reads as the verb (e.g. "delegate")
+    // would otherwise render a duplicate "delegate delegate". When the role
+    // collapses to the verb, the verb already carries the signal — drop the
+    // echoed role rather than repeat it.
+    let show_role = !role.eq_ignore_ascii_case(verb);
+    let mut fixed_parts: Vec<&str> = vec![glyph_text.as_str(), verb, " "];
+    if show_role {
+        fixed_parts.push(role);
+        fixed_parts.push(" ");
+    }
+    fixed_parts.push(status_text.as_str());
+    fixed_parts.push(" ");
+    let fixed_width = fixed_parts
+        .iter()
+        .map(|text| UnicodeWidthStr::width(*text))
+        .sum::<usize>();
     let detail = truncate_action(detail, width.saturating_sub(fixed_width));
-    Line::from(vec![
+    let mut spans = vec![
         Span::styled(
             glyph_text,
             Style::default()
@@ -405,12 +409,21 @@ fn card_header(
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
-        Span::styled(role.to_string(), Style::default().fg(palette::TEXT_PRIMARY)),
-        Span::raw(" "),
-        Span::styled(status_text, Style::default().fg(header_color)),
-        Span::raw(" "),
-        Span::styled(detail, Style::default().fg(palette::TEXT_MUTED)),
-    ])
+    ];
+    if show_role {
+        spans.push(Span::styled(
+            role.to_string(),
+            Style::default().fg(palette::TEXT_PRIMARY),
+        ));
+        spans.push(Span::raw(" "));
+    }
+    spans.push(Span::styled(status_text, Style::default().fg(header_color)));
+    spans.push(Span::raw(" "));
+    spans.push(Span::styled(
+        detail,
+        Style::default().fg(palette::TEXT_MUTED),
+    ));
+    Line::from(spans)
 }
 
 /// Map agent types to human-readable role labels (#1981).
@@ -544,6 +557,30 @@ mod tests {
                     .collect::<String>()
             })
             .collect()
+    }
+
+    #[test]
+    fn delegate_card_header_does_not_duplicate_verb_as_role() {
+        // #4148: a role that already reads as the "delegate" verb must not
+        // render "delegate delegate" in the default transcript. The verb
+        // stays; the echoed role is dropped.
+        let card = DelegateCard::new("agent_1", "delegate");
+        let rendered = render_to_strings(&card.render_lines(80)).join("\n");
+        assert!(
+            !rendered.contains("delegate delegate"),
+            "verb must not be echoed as the role: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("delegate"),
+            "the delegate verb itself must remain: {rendered:?}"
+        );
+        // A real role still renders next to the verb (regression guard).
+        let worker = DelegateCard::new("agent_2", "general");
+        let worker_rendered = render_to_strings(&worker.render_lines(80)).join("\n");
+        assert!(
+            worker_rendered.contains("delegate worker"),
+            "distinct roles are still shown: {worker_rendered:?}"
+        );
     }
 
     #[test]
