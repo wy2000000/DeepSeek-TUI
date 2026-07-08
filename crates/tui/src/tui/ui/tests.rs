@@ -1,3 +1,4 @@
+use super::activity_detail::*;
 use super::*;
 use crate::config::{
     ApiProvider, Config, DEFAULT_OPENROUTER_MODEL, DEFAULT_TEXT_MODEL, DEFAULT_ZAI_MODEL,
@@ -21,6 +22,7 @@ use crate::tui::history::{
     ExecCell, ExecSource, GenericToolCell, HistoryCell, SubAgentCell, ToolCell, ToolStatus,
 };
 use crate::tui::hotbar::actions::{HotbarActionCategory, HotbarDispatch};
+use crate::tui::ui_text::truncate_line_to_width;
 use crate::tui::views::{HelpView, ModalView, ViewAction};
 use crate::working_set::Workspace;
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
