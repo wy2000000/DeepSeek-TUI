@@ -364,6 +364,17 @@ pub enum SidebarFocus {
     Hidden,
 }
 
+/// Browsing context captured when the `/model` picker is dismissed (#4109).
+/// Plain data so `App` does not depend on the picker's internal view enum.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelPickerMemory {
+    /// True when the user left the picker in the full-catalog view
+    /// (`A` toggle), false for the configured-only default view.
+    pub catalog_view: bool,
+    /// Model row id highlighted at dismissal, if it was a real row.
+    pub selected_row_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AgentProgressMeta {
     pub parent_run_id: Option<String>,
@@ -1766,6 +1777,10 @@ pub struct App {
     /// Last successfully rendered Work panel summary. Transient mutex misses
     /// should not wipe completed checklist/strategy state from the sidebar.
     pub(crate) cached_work_summary: Option<SidebarWorkSummary>,
+    /// Browsing context from the last dismissed `/model` picker, so reopening
+    /// restores the view mode and highlighted row instead of resetting to the
+    /// top (#4109 picker memory). Session-scoped, never persisted.
+    pub model_picker_memory: Option<ModelPickerMemory>,
     /// Last known mouse position for tooltip placement.
     pub last_mouse_pos: Option<(u16, u16)>,
     /// Whether the user is currently dragging the sidebar resize handle.
@@ -2757,6 +2772,7 @@ impl App {
             sidebar_hover: SidebarHoverState::default(),
             sidebar_hover_tooltip: None,
             cached_work_summary: None,
+            model_picker_memory: None,
             last_mouse_pos: None,
             sidebar_resizing: false,
             sidebar_resize_anchor_x: 0,

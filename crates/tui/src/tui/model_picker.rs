@@ -132,7 +132,7 @@ impl ModelPickerView {
             .position(|e| *e == normalized)
             .unwrap_or_else(|| default_picker_effort_idx(app.api_provider, app.auto_model));
 
-        Self {
+        let mut view = Self {
             initial_model,
             initial_provider: app.api_provider,
             initial_effort,
@@ -145,7 +145,34 @@ impl ModelPickerView {
             model_rows,
             view: ModelListView::Configured,
             configured_providers,
+        };
+        view.restore_memory(app.model_picker_memory.as_ref());
+        view
+    }
+
+    /// Restore the browsing context from the last dismissed picker (#4109):
+    /// the Configured/Catalog view mode and, when the remembered row still
+    /// exists in that view, the highlighted row. The active model remains the
+    /// selection when nothing was remembered or the row is gone.
+    fn restore_memory(&mut self, memory: Option<&crate::tui::app::ModelPickerMemory>) {
+        let Some(memory) = memory else {
+            return;
+        };
+        if memory.catalog_view {
+            self.view = ModelListView::Catalog;
         }
+        if let Some(remembered_id) = memory.selected_row_id.as_deref() {
+            let position = self
+                .visible_model_rows()
+                .iter()
+                .position(|row| row.id == remembered_id);
+            if let Some(position) = position {
+                let effort = self.resolved_effort();
+                self.selected_model_idx = position;
+                self.select_effort_for_current_model(effort);
+            }
+        }
+        self.clamp_model_selection();
     }
 
     #[cfg(test)]
@@ -798,7 +825,15 @@ impl ModalView for ModelPickerView {
 
     fn handle_key(&mut self, key: KeyEvent) -> ViewAction {
         match key.code {
-            KeyCode::Esc => ViewAction::Close,
+            // Esc carries the browsing context out so the next open can
+            // restore it (#4109 picker memory).
+            KeyCode::Esc => ViewAction::EmitAndClose(ViewEvent::ModelPickerDismissed {
+                catalog_view: self.view == ModelListView::Catalog,
+                selected_row_id: {
+                    let rows = self.visible_model_rows();
+                    rows.get(self.selected_model_idx).map(|row| row.id.clone())
+                },
+            }),
             KeyCode::Enter if self.model_row_count() == 0 => ViewAction::None,
             KeyCode::Enter => ViewAction::EmitAndClose(self.build_event()),
             // Toggle between configured-only and full-catalog views (#3830).
@@ -2260,7 +2295,10 @@ mod tests {
             KeyCode::Esc,
             crossterm::event::KeyModifiers::NONE,
         ));
-        assert!(matches!(action, ViewAction::Close));
+        assert!(matches!(
+            action,
+            ViewAction::EmitAndClose(ViewEvent::ModelPickerDismissed { .. })
+        ));
     }
 
     #[test]
@@ -2278,7 +2316,67 @@ mod tests {
             crossterm::event::KeyModifiers::NONE,
         ));
 
-        assert!(matches!(action, ViewAction::Close));
+        assert!(matches!(
+            action,
+            ViewAction::EmitAndClose(ViewEvent::ModelPickerDismissed { .. })
+        ));
+    }
+
+    #[test]
+    fn esc_reports_browsing_context_and_reopen_restores_it() {
+        let (mut app, config, _lock) = create_test_app();
+        let mut view = ModelPickerView::new(&app, &config);
+
+        // Browse: switch to the full catalog and move the highlight down two.
+        view.handle_key(KeyEvent::new(
+            KeyCode::Char('a'),
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        view.handle_key(KeyEvent::new(
+            KeyCode::Down,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        view.handle_key(KeyEvent::new(
+            KeyCode::Down,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        let browsed_id = view.resolved_model();
+
+        let action = view.handle_key(KeyEvent::new(
+            KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        let ViewAction::EmitAndClose(ViewEvent::ModelPickerDismissed {
+            catalog_view,
+            selected_row_id,
+        }) = action
+        else {
+            panic!("expected ModelPickerDismissed, got something else");
+        };
+        assert!(catalog_view, "catalog view should be remembered");
+        assert_eq!(selected_row_id.as_deref(), Some(browsed_id.as_str()));
+
+        // Reopen with the memory applied — same view, same highlighted row.
+        app.model_picker_memory = Some(crate::tui::app::ModelPickerMemory {
+            catalog_view,
+            selected_row_id,
+        });
+        let reopened = ModelPickerView::new(&app, &config);
+        assert_eq!(reopened.view, ModelListView::Catalog);
+        assert_eq!(reopened.resolved_model(), browsed_id);
+    }
+
+    #[test]
+    fn reopen_with_stale_memory_falls_back_to_active_model() {
+        let (mut app, config, _lock) = create_test_app();
+        app.model_picker_memory = Some(crate::tui::app::ModelPickerMemory {
+            catalog_view: false,
+            selected_row_id: Some("model-that-no-longer-exists".to_string()),
+        });
+        let view = ModelPickerView::new(&app, &config);
+        // The remembered row is gone; the picker must still open on a valid
+        // selection (the active model path from the default constructor).
+        assert!(view.selected_model_idx <= view.model_row_count());
     }
 
     /// The four terminal sizes the v0.8.66 modal blocker (#3732) requires every

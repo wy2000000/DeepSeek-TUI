@@ -10645,6 +10645,15 @@ async fn handle_view_events(
                 )
                 .await;
             }
+            ViewEvent::ModelPickerDismissed {
+                catalog_view,
+                selected_row_id,
+            } => {
+                app.model_picker_memory = Some(crate::tui::app::ModelPickerMemory {
+                    catalog_view,
+                    selected_row_id,
+                });
+            }
             ViewEvent::ProviderPickerApplied {
                 provider,
                 provider_id,
