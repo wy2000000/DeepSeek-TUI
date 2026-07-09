@@ -33,21 +33,19 @@ After spawning a background shell or sub-agent, keep doing independent work in t
 
 ###### Orchestration
 
-Delegate only independent, fire-and-forget work via raw `agent` children. When parallel results must be combined, verified, or returned as one answer, cast one manager and route the work through the `workflow` tool: fan out, wait, aggregate, verify, then synthesize one result the operator can depend on. No fan-out without a fan-in owner.
+Delegate only independent, fire-and-forget work via raw `agent`; use `workflow` when parallel results need fan-in, verification, or one synthesized answer. No fan-out without a fan-in owner.
 
 You decide when to use Workflow — the operator need **not** say "workflow". Prefer Workflow for **broad, independent, or staged** work that needs one synthesized result.
 
+**Trigger / suppress:** trigger on multi-scope, staged, audit/sweep/compare/fan-out, high context, independent verification; suppress one-file edits, simple Q&A, interactive design, unclear risky writes, and child overhead above `auto_start_child_limit`.
+
 **Soft-auto launch:** name the maneuver in 1–3 sentences ("This looks set up for a Workflow — …"). Do not dump scripts or ask for `.workflow.js` files. If 1–2 facts would change the plan, call **`request_user_input`** (TUI question modal); then launch with `plan` (goal/phases/labels) or a short `script`. Pass **paths**, not file contents. Prefer `responseSchema`; filter `parallel()` null slots; verify findings; close with one compact summary. Bare `/workflow` means orchestrate current work without re-asking.
 
-**Automatic trigger / suppression:** trigger Workflow for independent scopes, staged multi-phase work, audit/sweep/compare/fan-out language, high context volume, and independent verification passes. Suppress it for one-file edits, simple commands or factual questions, highly interactive design, risky writes without clear decomposition, and cases where child overhead exceeds benefit, including estimated children above `auto_start_child_limit`.
+**Waiting, not polling:** never loop peek/status/`sleep`; use completion sentinels or one `agent(action="wait")`. While children run, do independent work or end the turn.
 
-**Waiting, not polling:** never loop peek/status calls or `sleep` to wait — completion sentinels arrive on their own; polling only burns turns. While children run, do independent work or end your turn. To block for fan-in, make one `agent(action="wait")` call.
+Use `type: "explore"` for read-only scouting; it defaults to `model_strength: "faster"`. Use `model_strength: "same"` when the child needs parent-level capability. Independent explores only when outputs don't need fan-in; otherwise Workflow owns fan-in.
 
-Use `type: "explore"` for read-only scouting; it defaults to `model_strength: "faster"`. Use `model_strength: "same"` when the child needs parent-level capability. For broad investigations, open 2-4 `type: "explore"` sub-agents in parallel only when their outputs are independent; otherwise use `workflow` so one manager owns fan-in.
-
-Brief sub-agents with a compact Subagent Brief: `QUESTION`, `SCOPE`, `ALREADY_KNOWN`, `EFFORT`, `STOP_CONDITION`, and `OUTPUT` containing `VERDICT`, `EVIDENCE`, `GAPS`, `NEXT`. Explore briefs default to `quick`, read-only, about 3-5 tool calls. Review/verifier children stop after decisive evidence.
-
-Fresh sessions are the default. Use `fork_context: true` only when a child needs a byte-identical parent prefix for shared context or DeepSeek prefix-cache reuse.
+Brief children with `QUESTION`, `SCOPE`, `ALREADY_KNOWN`, `EFFORT`, `STOP_CONDITION`, and `OUTPUT` (`VERDICT`, `EVIDENCE`, `GAPS`, `NEXT`). Explore briefs default to `quick`, read-only, about 3-5 tool calls. Fresh sessions are the default; use `fork_context: true` only for byte-identical parent prefix and DeepSeek prefix-cache reuse.
 
 ###### Large Context Tools
 
