@@ -144,7 +144,9 @@ fn workflow_tool_renders_run_card_instead_of_generic_oneliner() {
     assert!(joined.contains("children: 3"), "child count: {joined:?}");
     // #4119: history card uses typed task labels, not prompt text.
     assert!(
-        joined.contains("scan-docs") && joined.contains("check-fleet") && joined.contains("summarize"),
+        joined.contains("scan-docs")
+            && joined.contains("check-fleet")
+            && joined.contains("summarize"),
         "typed task labels: {joined:?}"
     );
     assert!(
