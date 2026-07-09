@@ -123,6 +123,10 @@ impl Harness {
         HarnessBuilder::new(program)
     }
 
+    pub fn pid(&self) -> Option<u32> {
+        self.pty.pid()
+    }
+
     pub fn send(&mut self, bytes: impl AsRef<[u8]>) -> Result<()> {
         self.pty.write_bytes(bytes.as_ref())
     }

@@ -1916,7 +1916,10 @@ async fn thinking_delta_emits_agent_reasoning_item() -> Result<()> {
         })
         .await?;
 
-    let deadline = Instant::now() + Duration::from_secs(2);
+    // A busy or constrained runner can be quiet for more than one 200 ms poll
+    // even though the engine is still making progress. Keep polling until the
+    // actual deadline instead of treating the first quiet interval as failure.
+    let deadline = Instant::now() + Duration::from_secs(5);
     let mut delta_seen = false;
     let mut completed_seen = false;
     while Instant::now() < deadline && (!delta_seen || !completed_seen) {
@@ -1943,7 +1946,8 @@ async fn thinking_delta_emits_agent_reasoning_item() -> Result<()> {
                     completed_seen = true;
                 }
             }
-            _ => break,
+            Ok(Err(_)) => break,
+            Err(_) => continue,
         }
     }
     assert!(delta_seen, "expected item.delta with kind=agent_reasoning");

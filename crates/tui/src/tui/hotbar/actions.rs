@@ -1446,7 +1446,11 @@ mod tests {
 
     use super::*;
 
-    fn test_app_with_paths(workspace: PathBuf, skills_dir: PathBuf) -> App {
+    fn test_app_with_paths_and_config(
+        workspace: PathBuf,
+        skills_dir: PathBuf,
+        config: &Config,
+    ) -> App {
         let options = TuiOptions {
             model: "deepseek-v4-pro".to_string(),
             workspace,
@@ -1468,9 +1472,13 @@ mod tests {
             resume_session_id: None,
             initial_input: None,
         };
-        let mut app = App::new(options, &Config::default());
+        let mut app = App::new(options, config);
         app.ui_locale = crate::localization::Locale::En;
         app
+    }
+
+    fn test_app_with_paths(workspace: PathBuf, skills_dir: PathBuf) -> App {
+        test_app_with_paths_and_config(workspace, skills_dir, &Config::default())
     }
 
     fn test_app() -> App {
@@ -2192,9 +2200,12 @@ mod tests {
             "---\nname: hotbar-demo-skill\ndescription: Demo skill for hotbar tests\n---\n\nFollow the demo instructions.\n",
         )
         .expect("write SKILL.md");
-        let mut app = test_app_with_paths(
+        let mut config = Config::default();
+        config.skills_dir = Some(skills_dir.path().to_string_lossy().into_owned());
+        let mut app = test_app_with_paths_and_config(
             workspace.path().to_path_buf(),
             skills_dir.path().to_path_buf(),
+            &config,
         );
 
         let action = app

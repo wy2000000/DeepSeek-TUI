@@ -155,6 +155,10 @@ impl PtySession {
         PtySessionBuilder::new(program)
     }
 
+    pub fn pid(&self) -> Option<u32> {
+        self.child.process_id()
+    }
+
     pub fn write_bytes(&mut self, bytes: &[u8]) -> Result<()> {
         self.writer.write_all(bytes).context("pty write")?;
         self.writer.flush().context("pty flush")?;
