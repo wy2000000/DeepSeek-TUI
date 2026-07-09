@@ -69,7 +69,11 @@ fn text_sse(model: &str, text: &str) -> String {
 }
 
 fn fanout_tool_call_sse() -> String {
-    let tool_calls = (1..=6)
+    fanout_tool_call_sse_n(6)
+}
+
+fn fanout_tool_call_sse_n(count: usize) -> String {
+    let tool_calls = (1..=count)
         .map(|worker| {
             json!({
                 "index": worker - 1,
@@ -472,6 +476,144 @@ async fn release_queued_steering_ctrl_s_sends_now_with_clear_status() -> Result<
         steer_started.elapsed() < Duration::from_secs(10),
         "Ctrl+S steering was not incorporated promptly"
     );
+
+    let _ = tui.shutdown();
+    Ok(())
+}
+
+#[derive(Clone)]
+struct BenchFanoutResponder {
+    child_requests: Arc<AtomicUsize>,
+    workers: usize,
+}
+
+impl Respond for BenchFanoutResponder {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        let body = request.body_json::<Value>().unwrap_or(Value::Null);
+        let raw = body.to_string();
+
+        if raw.contains("stay busy worker") && !raw.contains("launch benchmark QA workers") {
+            self.child_requests.fetch_add(1, Ordering::SeqCst);
+            return sse_response(text_sse(DEEPSEEK_TEST_MODEL, "child-finished-too-soon"))
+                .set_delay(Duration::from_secs(60));
+        }
+
+        if raw.contains("launch benchmark QA workers") {
+            return sse_response(fanout_tool_call_sse_n(self.workers));
+        }
+
+        sse_response(text_sse(DEEPSEEK_TEST_MODEL, "unexpected-request"))
+    }
+}
+
+fn rss_kib(pid: u32) -> Option<u64> {
+    let out = std::process::Command::new("ps")
+        .args(["-o", "rss=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+}
+
+/// #4014 acceptance benchmark: 32 concurrent loopback workers must keep the
+/// TUI live. Ignored by default (heavy storm); run explicitly with
+/// `cargo test -p codewhale-tui --test release_runtime_qa --locked -- \
+///  --ignored bench_thirty_two --nocapture --test-threads=1`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "heavy 32-worker storm; run explicitly for #4014 evidence"]
+async fn release_bench_thirty_two_worker_fanout_stays_live() -> Result<()> {
+    const WORKERS: usize = 32;
+    let _guard = RELEASE_RUNTIME_QA_LOCK.lock().await;
+    let server = MockServer::start().await;
+    mount_models(&server, &[DEEPSEEK_TEST_MODEL]).await;
+    let child_requests = Arc::new(AtomicUsize::new(0));
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(BenchFanoutResponder {
+            child_requests: Arc::clone(&child_requests),
+            workers: WORKERS,
+        })
+        .mount(&server)
+        .await;
+
+    let ws = make_sealed_workspace()?;
+    std::fs::write(
+        ws.home().join(".codewhale").join("config.toml"),
+        format!(
+            "[subagents]\nmax_concurrent = {WORKERS}\nlaunch_concurrency = {WORKERS}\nmax_admitted = {WORKERS}\n"
+        ),
+    )?;
+    let mut tui = common_tui_builder(&ws)
+        .env("CODEWHALE_PROVIDER", "deepseek")
+        .env("DEEPSEEK_API_KEY", "deepseek-local-test-key")
+        .env("DEEPSEEK_BASE_URL", server.uri())
+        .env("DEEPSEEK_MODEL", DEEPSEEK_TEST_MODEL)
+        .args(["--yolo", "--max-subagents", &WORKERS.to_string()])
+        .spawn()?;
+    tui.wait_for_text(COMPOSER_READY_TEXT, BOOT_TIMEOUT)?;
+    let pid = tui.pid();
+    let rss_idle = pid.and_then(rss_kib);
+
+    let spawn_started = Instant::now();
+    type_and_submit(
+        &mut tui,
+        "launch benchmark QA workers and keep the parent turn open",
+    )?;
+    wait_for_counter(&mut tui, &child_requests, WORKERS, Duration::from_secs(60))?;
+    let all_children_live = spawn_started.elapsed();
+    tui.wait_for_text(&format!("{WORKERS} running"), Duration::from_secs(10))?;
+    let sidebar_visible = spawn_started.elapsed();
+    let rss_storm = pid.and_then(rss_kib);
+
+    // Echo latency under storm: three samples.
+    let mut echo_samples = Vec::new();
+    for i in 0..3 {
+        let marker = format!("bench-live-marker-{i}");
+        let t = Instant::now();
+        tui.send(keys::key::text(&marker))?;
+        tui.wait_for_text(&marker, Duration::from_secs(5))?;
+        echo_samples.push(t.elapsed());
+        // Clear the composer for the next sample.
+        for _ in 0..marker.len() {
+            tui.send(b"\x7f")?;
+        }
+    }
+
+    let cancel_started = Instant::now();
+    tui.send(b"\x1b")?;
+    tui.wait_for(
+        |frame| {
+            let text = frame.text().to_ascii_lowercase();
+            text.contains("cancelled") || text.contains("interrupted")
+        },
+        Duration::from_secs(10),
+    )?;
+    let cancel_latency = cancel_started.elapsed();
+
+    tui.send(keys::key::text("post-cancel-live"))?;
+    tui.wait_for_text("post-cancel-live", Duration::from_secs(5))?;
+    let rss_after = pid.and_then(rss_kib);
+
+    println!(
+        "BENCH32: children_live={all_children_live:?} sidebar={sidebar_visible:?} \
+         echo={echo_samples:?} cancel={cancel_latency:?} \
+         rss_idle_kib={rss_idle:?} rss_storm_kib={rss_storm:?} rss_after_kib={rss_after:?}"
+    );
+
+    let worst_echo = echo_samples.iter().max().copied().unwrap_or_default();
+    assert!(
+        worst_echo < Duration::from_secs(2),
+        "typing echo exceeded 2s under a {WORKERS}-worker storm: {echo_samples:?}"
+    );
+    assert!(
+        cancel_latency < Duration::from_secs(5),
+        "Esc cancellation exceeded 5s under a {WORKERS}-worker storm: {cancel_latency:?}"
+    );
+    if let (Some(idle), Some(storm)) = (rss_idle, rss_storm) {
+        assert!(
+            storm < idle.saturating_mul(6).max(idle + 1_500_000),
+            "RSS exploded under storm: idle={idle} KiB storm={storm} KiB"
+        );
+    }
 
     let _ = tui.shutdown();
     Ok(())
