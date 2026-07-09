@@ -87,6 +87,7 @@ pub struct XaiOAuthCredentials {
     pub expires_at: Option<String>,
     #[allow(dead_code)]
     pub issuer: String,
+    #[allow(dead_code)]
     pub client_id: String,
 }
 
