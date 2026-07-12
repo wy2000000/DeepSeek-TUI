@@ -1173,6 +1173,54 @@ pub enum InitialInput {
     Submit(String),
 }
 
+/// Pre-session launch menu state for the underwater shell.
+///
+/// This is deliberately separate from onboarding and from the post-launch
+/// empty session. It selects real session/worktree actions before the
+/// transcript and composer become active.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaunchState {
+    pub visible: bool,
+    pub selected: usize,
+    pub worktree_input: Option<String>,
+    pub status: Option<String>,
+    pub workspace_session_count: usize,
+    pub worktree_available: bool,
+}
+
+impl LaunchState {
+    #[must_use]
+    pub fn new(visible: bool, workspace: &std::path::Path) -> Self {
+        let workspace_session_count = crate::session_manager::SessionManager::default_location()
+            .and_then(|manager| manager.list_sessions())
+            .map(|sessions| {
+                sessions
+                    .into_iter()
+                    .filter(|session| {
+                        crate::session_manager::workspace_scope_matches(
+                            &session.workspace,
+                            workspace,
+                        )
+                    })
+                    .count()
+            })
+            .unwrap_or(0);
+        let worktree_available = std::process::Command::new("git")
+            .current_dir(workspace)
+            .args(["rev-parse", "--show-toplevel"])
+            .output()
+            .is_ok_and(|output| output.status.success());
+        Self {
+            visible,
+            selected: 0,
+            worktree_input: None,
+            status: None,
+            workspace_session_count,
+            worktree_available,
+        }
+    }
+}
+
 // === Sub-state structs for App field organization (#377) ===
 
 /// Vim modal editing mode for the composer input area.
@@ -1483,6 +1531,9 @@ pub struct SidebarHoverState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SidebarRowAction {
     Command(String),
+    /// Put a destructive command in the composer instead of executing it.
+    /// The user confirms with Enter or cancels by editing/clearing the draft.
+    PrefillCommand(String),
     ToggleAgentDetails {
         agent_id: String,
     },
@@ -1502,7 +1553,8 @@ impl SidebarRowAction {
     pub fn as_command(&self) -> Option<&str> {
         match self {
             Self::Command(command) => Some(command.as_str()),
-            Self::ToggleAgentDetails { .. }
+            Self::PrefillCommand(_)
+            | Self::ToggleAgentDetails { .. }
             | Self::OpenAgentDetail { .. }
             | Self::CancelAgent { .. } => None,
         }
@@ -1512,6 +1564,7 @@ impl SidebarRowAction {
     pub fn is_cancel_action(&self) -> bool {
         match self {
             Self::Command(command) => command.contains(" cancel "),
+            Self::PrefillCommand(command) => command.contains(" cancel "),
             Self::CancelAgent { .. } => true,
             Self::ToggleAgentDetails { .. } | Self::OpenAgentDetail { .. } => false,
         }
@@ -1785,6 +1838,9 @@ pub struct App {
     pub fancy_animations: bool,
     /// `ombre` or `flat`; appearance is independent from motion settings.
     pub ocean_treatment: String,
+    /// Distinct pre-session menu. Once dismissed, the normal idle ocean owns
+    /// the empty session and this state stays hidden.
+    pub launch: LaunchState,
     /// Whether the renderer should wrap each frame in DEC mode 2026
     /// synchronized output. Resolved from `Settings::synchronized_output`
     /// at construction; `auto`/`on` → `true`, `off` → `false`. The Ptyxis
@@ -2453,9 +2509,12 @@ impl App {
             start_in_agent_mode,
             skip_onboarding,
             yolo,
-            resume_session_id: _,
+            resume_session_id,
             initial_input,
         } = options;
+
+        let launch_visible = resume_session_id.is_none() && initial_input.is_none();
+        let launch = LaunchState::new(launch_visible, &workspace);
 
         let settings = Settings::load().unwrap_or_else(|_| Settings::default());
 
@@ -2845,6 +2904,7 @@ impl App {
             ocean_started_at: Instant::now(),
             fancy_animations,
             ocean_treatment,
+            launch,
             synchronized_output_enabled,
             status_indicator,
             show_thinking,

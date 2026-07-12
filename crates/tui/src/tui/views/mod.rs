@@ -4,7 +4,7 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Clear, Paragraph, Widget, Wrap},
+    widgets::{Block, Borders, Clear, Padding, Paragraph, Widget, Wrap},
 };
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
@@ -53,6 +53,7 @@ pub enum ModalKind {
     FeedbackPicker,
     ThemePicker,
     ContextMenu,
+    ContextInspector,
 }
 
 /// Clear and paint a modal popup with an opaque surface.
@@ -89,6 +90,91 @@ pub(crate) fn render_modal_surface(area: Rect, popup_area: Rect, buf: &mut Buffe
     Block::default()
         .style(Style::default().bg(palette::WHALE_BG))
         .render(popup_area, buf);
+}
+
+/// Paint a full-screen underwater instrument surface and return its body.
+///
+/// Secondary rooms use one title hairline and one bottom action rail instead
+/// of a centered generic card. A one-cell outer margin is retained when the
+/// terminal can afford it; compact panes use every cell.
+pub(crate) fn render_underwater_surface(
+    area: Rect,
+    buf: &mut Buffer,
+    title: impl Into<String>,
+) -> Rect {
+    let margin_x = u16::from(area.width >= 44);
+    let margin_y = u16::from(area.height >= 14);
+    let surface = Rect {
+        x: area.x.saturating_add(margin_x),
+        y: area.y.saturating_add(margin_y),
+        width: area.width.saturating_sub(margin_x.saturating_mul(2)),
+        height: area.height.saturating_sub(margin_y.saturating_mul(2)),
+    };
+    Clear.render(area, buf);
+    Block::default()
+        .style(Style::default().bg(palette::WHALE_BG))
+        .render(area, buf);
+    let block = Block::default()
+        .title(Line::from(Span::styled(
+            format!(" {} ", title.into()),
+            Style::default()
+                .fg(palette::WHALE_ACCENT_PRIMARY)
+                .add_modifier(Modifier::BOLD),
+        )))
+        .borders(Borders::TOP | Borders::BOTTOM)
+        .border_style(Style::default().fg(palette::BORDER_COLOR))
+        .style(Style::default().bg(palette::WHALE_BG))
+        .padding(Padding::new(1, 1, 1, 1));
+    let inner = block.inner(surface);
+    block.render(surface, buf);
+    inner
+}
+
+/// Paint a scrollbar on the exact right edge of the panel it controls and
+/// return the content rect with that rail reserved. Nothing is drawn when all
+/// rows fit, so narrow surfaces do not spend a column on a fictional control.
+pub(crate) fn render_panel_scroll_rail(
+    area: Rect,
+    buf: &mut Buffer,
+    total_rows: usize,
+    offset: usize,
+    visible_rows: usize,
+    focused: bool,
+) -> Rect {
+    if area.width < 2 || area.height == 0 || total_rows <= visible_rows.max(1) {
+        return area;
+    }
+    let rail_x = area.right().saturating_sub(1);
+    let rail_height = usize::from(area.height);
+    let visible = visible_rows.max(1).min(total_rows);
+    let thumb_height = ((rail_height * visible).div_ceil(total_rows)).clamp(1, rail_height);
+    let max_offset = total_rows.saturating_sub(visible);
+    let travel = rail_height.saturating_sub(thumb_height);
+    let thumb_top = travel
+        .saturating_mul(offset.min(max_offset))
+        .checked_div(max_offset)
+        .unwrap_or(0);
+    let thumb_color = if focused {
+        palette::TEXT_MUTED
+    } else {
+        palette::TEXT_DIM
+    };
+    for local_y in 0..area.height {
+        let y = area.y.saturating_add(local_y);
+        let local = usize::from(local_y);
+        let is_thumb = local >= thumb_top && local < thumb_top + thumb_height;
+        buf[(rail_x, y)]
+            .set_symbol(if is_thumb { "█" } else { "│" })
+            .set_style(Style::default().fg(if is_thumb {
+                thumb_color
+            } else {
+                palette::BORDER_COLOR
+            }));
+    }
+    Rect {
+        width: area.width.saturating_sub(1),
+        ..area
+    }
 }
 
 fn render_modal_backdrop(area: Rect, buf: &mut Buffer) {
@@ -2142,20 +2228,11 @@ impl ModalView for ConfigView {
         use ratatui::{
             style::Style,
             text::{Line, Span},
-            widgets::{Block, Borders, Padding, Paragraph, Widget},
+            widgets::{Paragraph, Widget},
         };
 
-        let popup_area = centered_modal_area(area, 84, 22, 60, 12);
-
-        render_modal_surface(area, popup_area, buf);
-
-        let base_block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(palette::BORDER_COLOR))
-            .style(Style::default().bg(palette::WHALE_BG))
-            .padding(Padding::uniform(1));
-
-        let inner = base_block.inner(popup_area);
+        let inner =
+            render_underwater_surface(area, buf, self.tr(MessageId::ConfigModalTitle).to_string());
         let (lines, footer) = if let Some(edit) = self.editing.as_ref() {
             let mut lines: Vec<Line> = Vec::new();
             let edit_label = config_label_for_key(&edit.key);
@@ -2364,18 +2441,6 @@ impl ModalView for ConfigView {
             (lines, footer.to_string())
         };
 
-        let block = Block::default()
-            .title(Line::from(vec![Span::styled(
-                self.tr(MessageId::ConfigModalTitle),
-                Style::default().fg(palette::WHALE_ACCENT_PRIMARY).bold(),
-            )]))
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(palette::BORDER_COLOR))
-            .style(Style::default().bg(palette::WHALE_BG))
-            .padding(Padding::uniform(1));
-
-        let inner = block.inner(popup_area);
-        block.render(popup_area, buf);
         // Footer wraps inside the body so its hints can never run off the modal
         // edge (#3732); the table renders into the area above it.
         let content = render_modal_text_footer(
@@ -2384,6 +2449,18 @@ impl ModalView for ConfigView {
             &footer,
             Style::default().fg(palette::TEXT_MUTED),
         );
+        let content = if self.editing.is_none() {
+            render_panel_scroll_rail(
+                content,
+                buf,
+                self.visible_items().len(),
+                self.scroll,
+                self.last_visible_rows.get().max(1),
+                true,
+            )
+        } else {
+            content
+        };
         Paragraph::new(lines)
             .style(Style::default().fg(palette::TEXT_PRIMARY))
             .scroll((0, 0))

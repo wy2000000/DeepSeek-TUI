@@ -21,13 +21,14 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Padding, Paragraph, Widget, Wrap},
+    widgets::{Paragraph, Widget, Wrap},
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::palette;
 use crate::tui::views::{
     ActionHint, ModalKind, ModalView, ViewAction, ViewEvent, render_modal_footer,
+    render_panel_scroll_rail, render_underwater_surface,
 };
 
 pub struct PagerView {
@@ -404,25 +405,7 @@ impl ModalView for PagerView {
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer) {
-        let popup_width = area.width.saturating_sub(2).max(1);
-        let popup_height = area.height.saturating_sub(2).max(1);
-        let popup_area = Rect {
-            x: 1,
-            y: 1,
-            width: popup_width,
-            height: popup_height,
-        };
-
-        Clear.render(popup_area, buf);
-
-        let block = Block::default()
-            .title(self.title.clone())
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(palette::BORDER_COLOR))
-            .style(Style::default().bg(palette::WHALE_BG))
-            .padding(Padding::uniform(1));
-        let inner = block.inner(popup_area);
-        block.render(popup_area, buf);
+        let inner = render_underwater_surface(area, buf, self.title.clone());
 
         // The wrapping action footer is anchored to the bottom of the inner
         // area; the body fills the rows above it.
@@ -517,6 +500,8 @@ impl ModalView for PagerView {
             )));
         }
 
+        let content =
+            render_panel_scroll_rail(content, buf, self.lines.len(), scroll, visible_height, true);
         let paragraph = Paragraph::new(visible_lines).wrap(Wrap { trim: false });
         paragraph.render(content, buf);
     }

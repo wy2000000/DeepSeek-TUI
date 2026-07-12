@@ -10,6 +10,7 @@ visual motion and density for screen-reader and low-motion users.
 | Toggle | Default | Effect |
 | --- | --- | --- |
 | `NO_ANIMATIONS=1` env var | unset | At startup, forces `low_motion = true` and `fancy_animations = false`. Overrides whatever's saved in `settings.toml`. |
+| `CODEWHALE_ASCII_SAFE=1` env var | unset | Replaces decorative Unicode and box-drawing marks with narrow ASCII at the terminal backend. Labels, focus, state, and controls remain available. |
 | `low_motion` setting | `false` | Freezes decorative and state animation without changing model text delivery. The footer water strip is controlled separately by `fancy_animations`. |
 | `fancy_animations` setting | `true` | Enables expressive live-state chrome. Set to `false` to keep live-turn chrome still. |
 | `ocean_treatment` setting | `ombre` | Chooses the background appearance: `ombre` paints the static water column; `flat` uses the theme surface. This is independent of motion settings. |
@@ -25,6 +26,9 @@ Set these in your shell profile so they apply to every session:
 ```bash
 # Force low-motion + no fancy animations.
 export NO_ANIMATIONS=1
+
+# Force the terminal-safe ASCII rendering tier.
+export CODEWHALE_ASCII_SAFE=1
 
 # Optional: respect the wider terminal-color convention.
 export NO_COLOR=1            # honored by the underlying ratatui backend

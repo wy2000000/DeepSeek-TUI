@@ -454,6 +454,16 @@ pub(crate) fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> Vec<ViewEv
                             action: CommandPaletteAction::ExecuteCommand { command },
                         }];
                     }
+                    SidebarRowAction::PrefillCommand(command) => {
+                        app.input = command;
+                        app.cursor_position = app.input.len();
+                        app.status_message = Some(
+                            "Destructive action armed — press Enter to confirm or clear the draft to cancel"
+                                .to_string(),
+                        );
+                        app.needs_redraw = true;
+                        return Vec::new();
+                    }
                     SidebarRowAction::ToggleAgentDetails { agent_id } => {
                         if !app.expanded_sidebar_agents.insert(agent_id.clone()) {
                             app.expanded_sidebar_agents.remove(&agent_id);

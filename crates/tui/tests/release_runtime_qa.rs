@@ -174,6 +174,15 @@ fn common_tui_builder(ws: &SealedWorkspace) -> qa_harness::harness::HarnessBuild
         .size(42, 150)
 }
 
+/// Release scenarios exercise the session runtime, so cross the real launch
+/// surface the same way a user does before waiting for the composer.
+fn enter_launch_session(harness: &mut Harness) -> Result<()> {
+    harness.wait_for_text("New session", BOOT_TIMEOUT)?;
+    harness.send(keys::key::enter())?;
+    harness.wait_for_text(COMPOSER_READY_TEXT, BOOT_TIMEOUT)?;
+    Ok(())
+}
+
 fn wait_for_counter(
     harness: &mut Harness,
     counter: &AtomicUsize,
@@ -256,8 +265,8 @@ async fn release_multi_terminal_muse_and_gpt_routes_stay_isolated() -> Result<()
 
     let mut meta_tui = meta_builder.spawn()?;
     let mut openai_tui = openai_builder.spawn()?;
-    meta_tui.wait_for_text(COMPOSER_READY_TEXT, BOOT_TIMEOUT)?;
-    openai_tui.wait_for_text(COMPOSER_READY_TEXT, BOOT_TIMEOUT)?;
+    enter_launch_session(&mut meta_tui)?;
+    enter_launch_session(&mut openai_tui)?;
 
     // Change terminal B's model through the live command path while terminal A
     // remains open on Meta. Both processes share one sealed settings file.
@@ -361,7 +370,7 @@ async fn release_six_worker_fanout_keeps_typing_render_and_esc_cancel_live() -> 
         .env("DEEPSEEK_MODEL", DEEPSEEK_TEST_MODEL)
         .args(["--yolo", "--max-subagents", "6"])
         .spawn()?;
-    tui.wait_for_text(COMPOSER_READY_TEXT, BOOT_TIMEOUT)?;
+    enter_launch_session(&mut tui)?;
 
     type_and_submit(
         &mut tui,
@@ -433,7 +442,9 @@ impl Respond for SteeringResponder {
         if raw.contains("initial slow turn") {
             self.initial_requests.fetch_add(1, Ordering::SeqCst);
             return sse_response(text_sse(DEEPSEEK_TEST_MODEL, "initial-turn-output"))
-                .set_delay(Duration::from_secs(3));
+                // Leave enough room for the real launch transition plus the
+                // queued-preview assertion on slower release-gate machines.
+                .set_delay(Duration::from_secs(8));
         }
         sse_response(text_sse(DEEPSEEK_TEST_MODEL, "unexpected-request"))
     }
@@ -462,7 +473,7 @@ async fn release_queued_steering_ctrl_s_sends_now_with_clear_status() -> Result<
         .env("DEEPSEEK_BASE_URL", server.uri())
         .env("DEEPSEEK_MODEL", DEEPSEEK_TEST_MODEL)
         .spawn()?;
-    tui.wait_for_text(COMPOSER_READY_TEXT, BOOT_TIMEOUT)?;
+    enter_launch_session(&mut tui)?;
 
     type_and_submit(&mut tui, "initial slow turn")?;
     wait_for_counter(&mut tui, &initial_requests, 1, Duration::from_secs(3))?;
@@ -556,7 +567,7 @@ async fn release_bench_thirty_two_worker_fanout_stays_live() -> Result<()> {
         .env("DEEPSEEK_MODEL", DEEPSEEK_TEST_MODEL)
         .args(["--yolo", "--max-subagents", &WORKERS.to_string()])
         .spawn()?;
-    tui.wait_for_text(COMPOSER_READY_TEXT, BOOT_TIMEOUT)?;
+    enter_launch_session(&mut tui)?;
     let pid = tui.pid();
     let rss_idle = pid.and_then(rss_kib);
 

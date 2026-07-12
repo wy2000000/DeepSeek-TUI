@@ -1,17 +1,17 @@
 //! Session resume picker view for the TUI.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Local};
-use crossterm::event::{KeyCode, KeyEvent, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Padding, Paragraph, Widget, Wrap},
+    widgets::{Block, Borders, Padding, Paragraph, Widget, Wrap},
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -20,9 +20,12 @@ use crate::session_manager::{
     SavedSession, SessionManager, SessionMetadata, extract_title, extract_user_prompt,
     strip_thinking_tags,
 };
+use crate::tui::views::{
+    ActionHint, render_modal_footer, render_panel_scroll_rail, render_underwater_surface,
+};
 use crate::tui::views::{ModalKind, ModalView, ViewAction, ViewEvent};
 
-fn modal_block(title: &str) -> Block<'static> {
+fn section_block(title: &str) -> Block<'static> {
     Block::default()
         .title(Line::from(vec![Span::styled(
             title.to_string(),
@@ -30,7 +33,7 @@ fn modal_block(title: &str) -> Block<'static> {
                 .fg(palette::WHALE_ACCENT_PRIMARY)
                 .add_modifier(Modifier::BOLD),
         )]))
-        .borders(Borders::ALL)
+        .borders(Borders::TOP)
         .border_style(Style::default().fg(palette::BORDER_COLOR))
         .style(Style::default().bg(palette::WHALE_BG))
         .padding(Padding::uniform(1))
@@ -70,6 +73,9 @@ pub struct SessionPickerView {
     /// `false`, only sessions whose recorded `workspace` matches the
     /// canonicalised `workspace_scope`.
     show_all_workspaces: bool,
+    /// Screen rows owned by the visible session list. Keeping this local to
+    /// the view gives mouse and keyboard the same selection/resume contract.
+    last_row_hitboxes: RefCell<Vec<(u16, usize)>>,
 }
 
 impl SessionPickerView {
@@ -101,6 +107,7 @@ impl SessionPickerView {
             status: None,
             workspace_scope: Some(canonical_or_self(workspace.to_path_buf())),
             show_all_workspaces: false,
+            last_row_hitboxes: RefCell::new(Vec::new()),
         };
         view.apply_sort_and_filter();
         view.refresh_preview();
@@ -408,6 +415,26 @@ impl ModalView for SessionPickerView {
         match mouse.kind {
             MouseEventKind::ScrollUp => self.move_selection(-1),
             MouseEventKind::ScrollDown => self.move_selection(1),
+            MouseEventKind::Down(MouseButton::Left) => {
+                let clicked = self
+                    .last_row_hitboxes
+                    .borrow()
+                    .iter()
+                    .find_map(|(y, index)| (*y == mouse.row).then_some(*index));
+                if let Some(index) = clicked {
+                    if self.selected == index {
+                        if let Some(session) = self.filtered.get(index) {
+                            return ViewAction::EmitAndClose(ViewEvent::SessionSelected {
+                                session_id: session.id.clone(),
+                            });
+                        }
+                    } else {
+                        self.selected = index;
+                        self.ensure_selected_visible();
+                        self.refresh_preview();
+                    }
+                }
+            }
             _ => {}
         }
         ViewAction::None
@@ -544,16 +571,21 @@ impl ModalView for SessionPickerView {
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer) {
-        let popup_area = Rect {
-            x: area.x.saturating_add(1),
-            y: area.y.saturating_add(1),
-            width: area.width.saturating_sub(2),
-            height: area.height.saturating_sub(2),
-        };
-
-        Clear.render(popup_area, buf);
-
-        let narrow = popup_area.width < 95;
+        let surface = render_underwater_surface(area, buf, "sessions");
+        let content = render_modal_footer(
+            surface,
+            buf,
+            &[
+                ActionHint::new("Enter", "resume"),
+                ActionHint::new("/", "search"),
+                ActionHint::new("s", "sort"),
+                ActionHint::new("r", "rename"),
+                ActionHint::new("a", "all workspaces"),
+                ActionHint::new("d", "delete"),
+                ActionHint::new("Esc", "close"),
+            ],
+        );
+        let narrow = content.width < 95;
         let chunks = Layout::default()
             .direction(if narrow {
                 Direction::Vertical
@@ -565,14 +597,15 @@ impl ModalView for SessionPickerView {
             } else {
                 [Constraint::Percentage(64), Constraint::Percentage(36)]
             })
-            .split(popup_area);
+            .split(content);
         let (history_area, list_area) = if narrow {
             (chunks[1], chunks[0])
         } else {
             (chunks[0], chunks[1])
         };
 
-        let list_inner = modal_block(" Sessions (1-9) ").inner(list_area);
+        let list_block = section_block(" sessions (1-9) ");
+        let list_inner = list_block.inner(list_area);
         let header_rows = 1 + usize::from(self.confirm_delete || self.status.is_some());
         let footer_rows = usize::from(!self.filtered.is_empty());
         let visible_rows = usize::from(list_inner.height)
@@ -580,11 +613,20 @@ impl ModalView for SessionPickerView {
             .max(1);
         self.update_list_viewport(visible_rows);
         let list_scroll = self.list_scroll.get();
+        list_block.render(list_area, buf);
+        let list_content = render_panel_scroll_rail(
+            list_inner,
+            buf,
+            self.filtered.len().saturating_add(header_rows),
+            list_scroll,
+            visible_rows,
+            true,
+        );
 
         let list_lines = build_list_lines(
             &self.filtered,
             self.selected,
-            list_inner.width,
+            list_content.width,
             list_scroll,
             visible_rows,
             self.search_mode,
@@ -595,24 +637,44 @@ impl ModalView for SessionPickerView {
             &self.rename_input,
             self.status.as_deref(),
         );
-        let list = Paragraph::new(list_lines)
-            .block(modal_block(" Sessions (1-9) "))
-            .wrap(Wrap { trim: false });
-        list.render(list_area, buf);
+        *self.last_row_hitboxes.borrow_mut() = (0..visible_rows)
+            .filter_map(|row| {
+                let index = list_scroll.saturating_add(row);
+                (index < self.filtered.len()).then_some((
+                    list_content
+                        .y
+                        .saturating_add(header_rows as u16)
+                        .saturating_add(row as u16),
+                    index,
+                ))
+            })
+            .collect();
+        Paragraph::new(list_lines)
+            .wrap(Wrap { trim: false })
+            .render(list_content, buf);
 
-        let history_inner = modal_block(" History (PgUp/PgDn) ").inner(history_area);
+        let history_block = section_block(" history (PgUp/PgDn) ");
+        let history_inner = history_block.inner(history_area);
         self.update_history_viewport(history_inner.height as usize);
+        history_block.render(history_area, buf);
+        let history_content = render_panel_scroll_rail(
+            history_inner,
+            buf,
+            self.current_preview.len(),
+            self.history_scroll.get(),
+            history_inner.height as usize,
+            false,
+        );
         let visible_preview = visible_preview_lines(
             &self.current_preview,
             self.history_scroll.get(),
-            history_inner.height as usize,
+            history_content.height as usize,
         );
         let preview_lines = format_preview(&visible_preview);
 
-        let preview = Paragraph::new(preview_lines)
-            .block(modal_block(" History (PgUp/PgDn) "))
-            .wrap(Wrap { trim: false });
-        preview.render(history_area, buf);
+        Paragraph::new(preview_lines)
+            .wrap(Wrap { trim: false })
+            .render(history_content, buf);
     }
 }
 
@@ -637,9 +699,7 @@ fn build_list_lines(
     } else if rename_mode {
         format!("New title: {rename_input}_")
     } else {
-        format!(
-            "1-9 history | PgUp/PgDn scroll | Enter resume | / search | s sort | r rename | a all | d delete | Sort: {sort_label}"
-        )
+        format!("scope and sort · {sort_label}")
     };
     lines.push(Line::from(Span::styled(
         truncate(&header, width),
@@ -1025,6 +1085,7 @@ mod tests {
             status: None,
             workspace_scope,
             show_all_workspaces: false,
+            last_row_hitboxes: RefCell::new(Vec::new()),
         };
         view.apply_sort_and_filter();
         view
@@ -1266,15 +1327,18 @@ mod tests {
 
             let dump = buffer_text(&buf, area);
             assert!(
-                dump.contains("Sessions"),
+                dump.contains("sessions (1-9)"),
                 "{label} sessions pane missing:\n{dump}"
             );
             assert!(
-                dump.contains("History"),
+                dump.contains("history (PgUp/PgDn)"),
                 "{label} history pane missing:\n{dump}"
             );
-            assert!(dump.contains('┌'), "{label} top border missing:\n{dump}");
-            assert!(dump.contains('┘'), "{label} bottom border missing:\n{dump}");
+            assert!(dump.contains('─'), "{label} hairline missing:\n{dump}");
+            assert!(
+                !dump.contains('┌') && !dump.contains('┘'),
+                "{label} should use open hairlines, not boxed rooms:\n{dump}"
+            );
             assert!(
                 !dump.contains("suffix that must truncate"),
                 "{label} long title tail leaked instead of truncating:\n{dump}"
@@ -1515,6 +1579,7 @@ mod tests {
             status: None,
             workspace_scope: None,
             show_all_workspaces: true,
+            last_row_hitboxes: RefCell::new(Vec::new()),
         };
 
         view.selected = 6;
@@ -1568,8 +1633,8 @@ mod tests {
             // in-pane action header truncates to the (sometimes narrow) list
             // pane width, so assert the pane titles, which carry the digit-jump
             // and paging shortcuts and always fit.
-            assert!(text.contains("Sessions"), "{w}x{h}: missing Sessions pane");
-            assert!(text.contains("History"), "{w}x{h}: missing History pane");
+            assert!(text.contains("sessions"), "{w}x{h}: missing sessions pane");
+            assert!(text.contains("history"), "{w}x{h}: missing history pane");
             assert!(text.contains("1-9"), "{w}x{h}: missing 1-9 shortcut hint");
             assert!(text.contains("PgUp/PgDn"), "{w}x{h}: missing paging hint");
 

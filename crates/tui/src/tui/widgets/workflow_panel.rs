@@ -78,6 +78,7 @@ impl WorkflowPanelLifecycle {
 pub enum WorkflowRowStatus {
     Pending,
     Running,
+    Waiting,
     Succeeded,
     Failed,
     Cancelled,
@@ -90,6 +91,7 @@ impl WorkflowRowStatus {
         match self {
             Self::Pending => "pending",
             Self::Running => "running",
+            Self::Waiting => "waiting",
             Self::Succeeded => "done",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
@@ -99,7 +101,7 @@ impl WorkflowRowStatus {
 
     #[must_use]
     pub fn is_running(self) -> bool {
-        matches!(self, Self::Pending | Self::Running)
+        matches!(self, Self::Pending | Self::Running | Self::Waiting)
     }
 
     #[must_use]
@@ -116,6 +118,7 @@ impl WorkflowRowStatus {
         match self {
             Self::Pending => palette::TEXT_MUTED,
             Self::Running => palette::STATUS_WARNING,
+            Self::Waiting => palette::STATUS_ERROR,
             Self::Succeeded => palette::STATUS_SUCCESS,
             Self::Failed | Self::SchemaFailed => palette::STATUS_ERROR,
             Self::Cancelled => palette::TEXT_MUTED,
@@ -129,6 +132,7 @@ impl WorkflowRowStatus {
             "cancelled" | "canceled" => Self::Cancelled,
             "budget_exceeded" => Self::Failed,
             "running" => Self::Running,
+            "waiting" | "blocked" | "needs_user" => Self::Waiting,
             "pending" => Self::Pending,
             other if other.contains("schema") => Self::SchemaFailed,
             _ => Self::Failed,
@@ -187,7 +191,9 @@ impl WorkflowPanelPhase {
         for row in &self.rows {
             match row.status {
                 WorkflowRowStatus::Succeeded => done += 1,
-                WorkflowRowStatus::Running | WorkflowRowStatus::Pending => running += 1,
+                WorkflowRowStatus::Running
+                | WorkflowRowStatus::Pending
+                | WorkflowRowStatus::Waiting => running += 1,
                 WorkflowRowStatus::Failed | WorkflowRowStatus::SchemaFailed => failed += 1,
                 WorkflowRowStatus::Cancelled => cancelled += 1,
             }
@@ -785,7 +791,8 @@ impl WorkflowPanel {
             .take(8)
             .map(|row| {
                 format!(
-                    "{label} ({status})",
+                    "{mark} {label} ({status})",
+                    mark = role_mark(row.profile.as_deref()),
                     label = short_label(&row.label, 16),
                     status = row.status.label()
                 )
@@ -805,6 +812,48 @@ impl WorkflowPanel {
             lines.push(Line::from(Span::styled(
                 truncate_line_to_width(&format!("children: {body}"), content_width),
                 Style::default().fg(palette::TEXT_TOOL_OUTPUT),
+            )));
+        }
+
+        // The history variant uses the same real-data lane vocabulary as the
+        // live panel. Durations are proportional within the run; gates remain
+        // a separate named line because runtime events do not yet timestamp
+        // them precisely enough to place them on a synthetic timeline.
+        let rows = self.phases.iter().flat_map(|phase| phase.rows.iter());
+        let max_elapsed = rows
+            .clone()
+            .map(|row| row_elapsed_ms(row, now_ms()))
+            .max()
+            .unwrap_or(0);
+        for row in rows.take(8) {
+            lines.push(Line::from(Span::styled(
+                truncate_line_to_width(
+                    &format!(
+                        "lane {mark} {label:<14} {track} {elapsed} {status}",
+                        mark = role_mark(row.profile.as_deref()),
+                        label = short_label(&row.label, 14),
+                        track = lane_track(row, max_elapsed, 16, now_ms()),
+                        elapsed = format_elapsed(row_elapsed_ms(row, now_ms())),
+                        status = row.status.label(),
+                    ),
+                    content_width,
+                ),
+                Style::default().fg(row.status.color()),
+            )));
+        }
+
+        if self.lifecycle.is_terminal() {
+            let (done, total) = self.done_total();
+            let (failed, cancelled) = self.failure_cancel_counts();
+            lines.push(Line::from(Span::styled(
+                truncate_line_to_width(
+                    &format!(
+                        "debrief: {done}/{total} settled · {failed} failed · {cancelled} cancelled · {}",
+                        self.elapsed_label()
+                    ),
+                    content_width,
+                ),
+                Style::default().fg(palette::TEXT_MUTED),
             )));
         }
 
@@ -1401,10 +1450,7 @@ impl WorkflowPanel {
     }
 
     fn render_row_line(&self, row: &WorkflowPanelRow, width: usize, now_ms: u64) -> Line<'static> {
-        let elapsed_ms = row
-            .completed_at_ms
-            .unwrap_or(now_ms)
-            .saturating_sub(row.started_at_ms);
+        let elapsed_ms = row_elapsed_ms(row, now_ms);
         let elapsed = format_elapsed(elapsed_ms);
         let role = row.profile.as_deref().unwrap_or("-");
         let model = match (row.model.as_deref(), row.strength.as_deref()) {
@@ -1421,9 +1467,11 @@ impl WorkflowPanel {
             .map(|e| format!(" !{}", short_label(e, 24)))
             .unwrap_or_default();
         let text = format!(
-            "  {status:<9} {label} · {role} · {model} · {worktree} · {elapsed}{schema}",
+            "  {mark} {status:<9} {label} · {role} · {model} · {worktree} · {lane} · {elapsed}{schema}",
+            mark = role_mark(row.profile.as_deref()),
             status = row.status.label(),
             label = short_label(&row.label, 18),
+            lane = lane_track(row, elapsed_ms.max(1), 10, now_ms),
         );
         Line::from(Span::styled(
             truncate_line_to_width(&text, width),
@@ -1539,6 +1587,60 @@ fn short_label(text: &str, max: usize) -> String {
         return trimmed.to_string();
     }
     truncate_line_to_width(trimmed, max)
+}
+
+/// Terminal-safe role grammar from the underwater design contract. Labels
+/// remain authoritative; the marks make siblings scan as the same work kind.
+fn role_mark(profile: Option<&str>) -> &'static str {
+    let role = profile.unwrap_or_default().trim().to_ascii_lowercase();
+    if role.contains("operator") {
+        "@"
+    } else if role.contains("manager") || role.contains("lead") || role.contains("coordinator") {
+        "/\\"
+    } else if role.contains("scout") || role.contains("research") || role.contains("explor") {
+        "<>"
+    } else if role.contains("build") || role.contains("implement") || role.contains("engineer") {
+        "[]"
+    } else if role.contains("verif") || role.contains("test") || role.contains("qa") {
+        "()"
+    } else if role.contains("review") || role.contains("critic") {
+        "**"
+    } else {
+        "--"
+    }
+}
+
+fn row_elapsed_ms(row: &WorkflowPanelRow, now_ms: u64) -> u64 {
+    row.completed_at_ms
+        .unwrap_or(now_ms)
+        .saturating_sub(row.started_at_ms)
+}
+
+fn lane_track(row: &WorkflowPanelRow, max_elapsed_ms: u64, width: usize, now_ms: u64) -> String {
+    let width = width.max(4);
+    let elapsed = row_elapsed_ms(row, now_ms);
+    let filled = if max_elapsed_ms == 0 {
+        1
+    } else {
+        ((elapsed as u128 * width as u128) / max_elapsed_ms as u128).clamp(1, width as u128)
+            as usize
+    };
+    let end = match row.status {
+        WorkflowRowStatus::Succeeded => "OK",
+        WorkflowRowStatus::Failed | WorkflowRowStatus::SchemaFailed => "!!",
+        WorkflowRowStatus::Cancelled => "XX",
+        WorkflowRowStatus::Waiting => "? ",
+        WorkflowRowStatus::Pending => ". ",
+        WorkflowRowStatus::Running => "> ",
+    };
+    let body_width = width.saturating_sub(2);
+    let active = filled.saturating_sub(2).min(body_width);
+    format!(
+        "{}{}{}",
+        "=".repeat(active),
+        end,
+        "-".repeat(body_width.saturating_sub(active))
+    )
 }
 
 /// Format an elapsed duration for panel headers and history cards. Shared with

@@ -113,15 +113,18 @@ pub fn render_sidebar(f: &mut Frame, area: Rect, app: &mut App, config: &Config)
 /// Height of the transcript-top Tasks / To-do strip from the underwater TUI
 /// action spec. It collapses completely when neither durable background work
 /// nor current work state exists, preserving the full launch water field.
-pub(crate) fn top_work_strip_height(app: &mut App, _width: u16) -> u16 {
+pub(crate) fn top_work_strip_height(app: &mut App, _width: u16, terminal_height: u16) -> u16 {
     let has_tasks = app
         .task_panel
         .iter()
         .any(|task| task.kind == TaskPanelEntryKind::Background);
     let has_todo = sidebar_work_summary(app).has_useful_content();
-    match (has_tasks, has_todo) {
-        (false, false) => 0,
-        (true, true) => 7,
+    match (has_tasks, has_todo, terminal_height) {
+        (false, false, _) => 0,
+        (true, true, 0..=12) => 3,
+        (true, true, 13..=16) => 5,
+        (true, true, _) => 7,
+        (_, _, 0..=12) => 3,
         _ => 4,
     }
 }
@@ -142,6 +145,11 @@ pub(crate) fn render_top_work_strip(f: &mut Frame, area: Rect, app: &mut App) {
         .iter()
         .any(|task| task.kind == TaskPanelEntryKind::Background);
     let has_todo = summary.has_useful_content();
+    if has_tasks && has_todo && area.height <= 3 {
+        render_compact_top_work_strip(f, area, &summary, app);
+        render_top_strip_rule(f, area, app);
+        return;
+    }
     if has_tasks && !has_todo {
         render_top_tasks(
             f,
@@ -181,6 +189,103 @@ pub(crate) fn render_top_work_strip(f: &mut Frame, area: Rect, app: &mut App) {
     render_top_strip_rule(f, area, app);
 }
 
+fn render_compact_top_work_strip(
+    f: &mut Frame,
+    area: Rect,
+    summary: &SidebarWorkSummary,
+    app: &mut App,
+) {
+    let task = app
+        .task_panel
+        .iter()
+        .find(|task| task.kind == TaskPanelEntryKind::Background);
+    let todo = summary
+        .checklist_items
+        .iter()
+        .find(|item| item.status == TodoStatus::InProgress)
+        .or_else(|| {
+            summary
+                .checklist_items
+                .iter()
+                .find(|item| item.status == TodoStatus::Pending)
+        });
+    let mut lines = Vec::new();
+    let mut hover_rows = Vec::new();
+    let mut full_lines = Vec::new();
+
+    if let Some(task) = task {
+        let stoppable = matches!(
+            task.status.as_str(),
+            "running" | "queued" | "waiting" | "needs_user"
+        );
+        let controls = if stoppable { " open stop" } else { " open" };
+        let prefix = format!("Tasks {} · ", app.task_panel.len());
+        let label_width = usize::from(area.width)
+            .saturating_sub(
+                UnicodeWidthStr::width(prefix.as_str()) + UnicodeWidthStr::width(controls),
+            )
+            .max(1);
+        let label = truncate_line_to_width(&task.prompt_summary, label_width);
+        let text = format!("{prefix}{label}{controls}");
+        lines.push(Line::from(Span::styled(
+            text.clone(),
+            Style::default().fg(app.ui_theme.text_body),
+        )));
+        let (show, stop) = background_task_click_actions(task);
+        let stop_width = UnicodeWidthStr::width("stop");
+        let visible_width = UnicodeWidthStr::width(text.as_str()).min(area.width as usize);
+        let stop_action = stoppable.then_some(SidebarRowAction::PrefillCommand(stop));
+        let stop_zone_start_col = stop_action.as_ref().map(|_| {
+            area.x
+                .saturating_add(visible_width.saturating_sub(stop_width) as u16)
+        });
+        hover_rows.push(SidebarHoverRow {
+            row_y: area.y,
+            display_text: text,
+            full_text: task.prompt_summary.clone(),
+            detail: Some(format!("{} · {}", task.status, task.id)),
+            is_truncated: label != task.prompt_summary,
+            click_action: Some(SidebarRowAction::Command(show)),
+            stop_action,
+            stop_zone_start_col,
+            stop_zone_end_col: stop_zone_start_col
+                .map(|start| start.saturating_add(stop_width as u16)),
+        });
+        full_lines.push(task.prompt_summary.clone());
+    }
+    if let Some(item) = todo {
+        let completed = summary
+            .checklist_items
+            .iter()
+            .filter(|candidate| candidate.status == TodoStatus::Completed)
+            .count();
+        let prefix = format!("To-do {completed}/{} · ", summary.checklist_items.len());
+        let label = truncate_line_to_width(
+            &item.content,
+            usize::from(area.width)
+                .saturating_sub(UnicodeWidthStr::width(prefix.as_str()))
+                .max(1),
+        );
+        lines.push(Line::from(Span::styled(
+            format!("{prefix}{label}"),
+            Style::default().fg(app.ui_theme.accent_primary),
+        )));
+        full_lines.push(item.content.clone());
+    }
+    Paragraph::new(lines).render(
+        Rect {
+            height: area.height.saturating_sub(1),
+            ..area
+        },
+        f.buffer_mut(),
+    );
+    app.sidebar_hover.sections.push(SidebarHoverSection {
+        content_area: area,
+        lines: full_lines,
+        rows: hover_rows,
+    });
+}
+
 fn render_top_strip_rule(f: &mut Frame, area: Rect, app: &App) {
     let rule_y = area.bottom().saturating_sub(1);
     for x in area.left()..area.right() {
@@ -191,7 +296,7 @@ fn render_top_strip_rule(f: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-fn render_top_tasks(f: &mut Frame, area: Rect, app: &App) {
+fn render_top_tasks(f: &mut Frame, area: Rect, app: &mut App) {
     let tasks = app
         .task_panel
         .iter()
@@ -211,7 +316,9 @@ fn render_top_tasks(f: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(app.ui_theme.text_muted),
         ),
     ])];
-    for task in tasks.into_iter().take(2) {
+    let mut hover_rows = Vec::new();
+    let mut hover_lines = vec!["Tasks".to_string()];
+    for (visible_index, task) in tasks.into_iter().take(2).enumerate() {
         let (mark, mark_color, label_color) = match task.status.as_str() {
             "waiting" | "needs_user" => ("◆", app.ui_theme.error_fg, app.ui_theme.error_fg),
             "running" => (
@@ -236,10 +343,15 @@ fn render_top_tasks(f: &mut Frame, area: Rect, app: &App) {
         };
         let duration = task.duration_ms.map(format_duration_ms).unwrap_or_default();
         let duration_width = UnicodeWidthStr::width(duration.as_str());
-        let controls = if matches!(task.status.as_str(), "running" | "waiting" | "needs_user") {
-            " [↗] [×]"
+        let stoppable = matches!(task.status.as_str(), "running" | "waiting" | "needs_user");
+        let controls = if area.width < 60 && stoppable {
+            " open stop"
+        } else if area.width < 60 {
+            " open"
+        } else if stoppable {
+            " [↗ open] [× stop]"
         } else {
-            " [↗]"
+            " [↗ open]"
         };
         let controls_width = UnicodeWidthStr::width(controls);
         let summary_width = width
@@ -254,7 +366,7 @@ fn render_top_tasks(f: &mut Frame, area: Rect, app: &App) {
                 .saturating_sub(used + duration_width + controls_width)
                 .max(2)
         };
-        lines.push(Line::from(vec![
+        let line = Line::from(vec![
             Span::raw("  "),
             Span::styled(mark, Style::default().fg(mark_color)),
             Span::raw(" "),
@@ -262,9 +374,43 @@ fn render_top_tasks(f: &mut Frame, area: Rect, app: &App) {
             Span::raw(" ".repeat(gap)),
             Span::styled(duration, Style::default().fg(app.ui_theme.text_hint)),
             Span::styled(controls, Style::default().fg(app.ui_theme.info)),
-        ]));
+        ]);
+        let display_text = spans_to_text(&line.spans);
+        let (show, stop) = background_task_click_actions(task);
+        let display_width = UnicodeWidthStr::width(display_text.as_str());
+        let stop_label = if area.width < 60 { "stop" } else { "[× stop]" };
+        let stop_width = UnicodeWidthStr::width(stop_label);
+        let visible_width = display_width.min(area.width as usize);
+        let stop_action = stoppable.then_some(SidebarRowAction::PrefillCommand(stop));
+        let stop_zone_start_col = stop_action.as_ref().map(|_| {
+            area.x.saturating_add(
+                visible_width
+                    .saturating_sub(stop_width)
+                    .min(u16::MAX as usize) as u16,
+            )
+        });
+        let stop_zone_end_col =
+            stop_zone_start_col.map(|start| start.saturating_add(stop_width as u16));
+        hover_lines.push(task.prompt_summary.clone());
+        hover_rows.push(SidebarHoverRow {
+            row_y: area.y.saturating_add(1 + visible_index as u16),
+            display_text: display_text.clone(),
+            full_text: task.prompt_summary.clone(),
+            detail: Some(format!("{} · {}", task.status, task.id)),
+            is_truncated: display_text != task.prompt_summary,
+            click_action: Some(SidebarRowAction::Command(show)),
+            stop_action,
+            stop_zone_start_col,
+            stop_zone_end_col,
+        });
+        lines.push(line);
     }
     Paragraph::new(lines).render(area, f.buffer_mut());
+    app.sidebar_hover.sections.push(SidebarHoverSection {
+        content_area: area,
+        lines: hover_lines,
+        rows: hover_rows,
+    });
 }
 
 fn render_top_todo(f: &mut Frame, area: Rect, summary: &SidebarWorkSummary, app: &App) {
@@ -3821,6 +3967,7 @@ fn agent_stop_action_for_click(action: &SidebarRowAction) -> Option<SidebarRowAc
             agent_id: agent_id.clone(),
         }),
         SidebarRowAction::Command(_)
+        | SidebarRowAction::PrefillCommand(_)
         | SidebarRowAction::OpenAgentDetail { .. }
         | SidebarRowAction::CancelAgent { .. } => None,
     }
@@ -3840,7 +3987,8 @@ mod tests {
         sidebar_hover_rows, sidebar_work_summary, sort_sidebar_agent_rows_as_tree,
         subagent_output_handle, subagent_panel_hover_texts, subagent_panel_lines,
         subagent_panel_rows, task_panel_hover_texts, task_panel_lines, task_panel_row_sets,
-        task_panel_rows, work_panel_empty_hint, work_panel_hover_texts, work_panel_lines,
+        task_panel_rows, top_work_strip_height, work_panel_empty_hint, work_panel_hover_texts,
+        work_panel_lines,
     };
     use crate::config::Config;
     use crate::localization::Locale;
@@ -3933,6 +4081,55 @@ mod tests {
         assert!(rendered.contains("1.2s"));
         assert!(rendered.contains("To-do"));
         assert!(rendered.contains("move work state to the top"));
+    }
+
+    #[test]
+    fn compact_top_work_strip_preserves_labels_and_task_controls_at_40x12() {
+        let mut app = create_test_app();
+        app.task_panel.push(TaskPanelEntry {
+            id: "shell-compact".to_string(),
+            status: "running".to_string(),
+            prompt_summary: "verify compact bottom budget".to_string(),
+            duration_ms: Some(900),
+            kind: TaskPanelEntryKind::Background,
+            stale: false,
+            elapsed_since_output_ms: None,
+            owner_agent_id: None,
+            owner_agent_name: None,
+        });
+        app.todos
+            .try_lock()
+            .expect("todos lock")
+            .add("keep prompt readable".to_string(), TodoStatus::InProgress);
+
+        assert_eq!(top_work_strip_height(&mut app, 40, 12), 3);
+        let backend = TestBackend::new(40, 3);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| render_top_work_strip(frame, frame.area(), &mut app))
+            .expect("compact top work strip");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(rendered.contains("Tasks"), "{rendered}");
+        assert!(rendered.contains("open stop"), "{rendered}");
+        assert!(rendered.contains("To-do"), "{rendered}");
+        assert!(rendered.contains("keep prompt"), "{rendered}");
+        assert_eq!(app.sidebar_hover.sections.len(), 1);
+        let row = &app.sidebar_hover.sections[0].rows[0];
+        assert!(matches!(
+            row.click_action,
+            Some(SidebarRowAction::Command(_))
+        ));
+        assert!(matches!(
+            row.stop_action,
+            Some(SidebarRowAction::PrefillCommand(_))
+        ));
     }
 
     #[test]

@@ -15,13 +15,13 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Padding, Paragraph, Widget},
+    widgets::{Paragraph, Widget},
 };
 
 use crate::palette::{SELECTABLE_THEMES, ThemeId, UiTheme};
 use crate::tui::views::{
-    ActionHint, ModalKind, ModalView, ViewAction, ViewEvent, centered_modal_area,
-    render_modal_footer,
+    ActionHint, ModalKind, ModalView, ViewAction, ViewEvent, render_modal_footer,
+    render_panel_scroll_rail, render_underwater_surface,
 };
 
 pub struct ThemePickerView {
@@ -170,12 +170,6 @@ impl ModalView for ThemePickerView {
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer) {
-        // 1 title + 1 spacer + N rows + spacer + the in-body action footer.
-        // centered_modal_area clamps strictly to `area`, so the modal always
-        // fits even on tiny or split-pane terminals.
-        let needed_height = (SELECTABLE_THEMES.len() as u16).saturating_add(10);
-        let popup_area = centered_modal_area(area, 78, needed_height, 44, 8);
-
         // The live theme has already been swapped under us via ConfigUpdated,
         // so we pull the *current* preview's UiTheme from the cursor row to
         // skin the modal chrome. That way the popup itself shifts color as
@@ -183,23 +177,7 @@ impl ModalView for ThemePickerView {
         // after Enter. We keep the live `surface_bg` (not the shared ink) and
         // the bare `Clear` so the preview backdrop reads as intended.
         let live = self.ui_theme_for(self.current());
-
-        Clear.render(popup_area, buf);
-
-        let block = Block::default()
-            .title(Line::from(Span::styled(
-                " Theme ",
-                Style::default()
-                    .fg(live.status_working)
-                    .add_modifier(Modifier::BOLD),
-            )))
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(live.border))
-            .style(Style::default().bg(live.surface_bg))
-            .padding(Padding::uniform(1));
-
-        let inner = block.inner(popup_area);
-        block.render(popup_area, buf);
+        let inner = render_underwater_surface(area, buf, "theme · live preview");
 
         let content = render_modal_footer(
             inner,
@@ -231,7 +209,30 @@ impl ModalView for ThemePickerView {
         )));
         lines.push(Line::from(""));
 
-        for (idx, id) in SELECTABLE_THEMES.iter().enumerate() {
+        let header_rows = lines.len();
+        let visible_rows = usize::from(content.height)
+            .saturating_sub(header_rows)
+            .max(1);
+        let max_start = SELECTABLE_THEMES.len().saturating_sub(visible_rows);
+        let start = self
+            .selected
+            .saturating_sub(visible_rows.saturating_sub(1))
+            .min(max_start);
+        let content = render_panel_scroll_rail(
+            content,
+            buf,
+            SELECTABLE_THEMES.len().saturating_add(header_rows),
+            start,
+            visible_rows,
+            true,
+        );
+
+        for (idx, id) in SELECTABLE_THEMES
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(visible_rows)
+        {
             let id = *id;
             let is_selected = idx == self.selected;
             let row_style = if is_selected {
@@ -456,6 +457,33 @@ mod tests {
             .collect::<String>();
         assert!(terminal_text.contains("Ombre unavailable"));
         assert!(terminal_text.contains("Terminal owns the background"));
+    }
+
+    #[test]
+    fn every_selectable_theme_previews_and_renders_through_the_same_surface() {
+        let area = ratatui::layout::Rect::new(0, 0, 100, 32);
+        let mut view = ThemePickerView::new("system".to_string());
+
+        for (index, expected) in SELECTABLE_THEMES.iter().copied().enumerate() {
+            view.selected = index;
+            assert_eq!(view.current(), expected);
+            assert_eq!(selected_name(&view.preview_event()), Some(expected.name()));
+
+            let mut buf = ratatui::buffer::Buffer::empty(area);
+            view.render(area, &mut buf);
+            let text = buf
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+            assert!(
+                text.contains(expected.display_name()),
+                "{} was not represented in its live preview surface",
+                expected.name()
+            );
+            assert!(text.contains("Treatment"));
+            assert!(text.contains("Enter save"));
+        }
     }
 
     #[test]

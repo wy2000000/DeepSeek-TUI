@@ -19,6 +19,7 @@ use ratatui::{
 use crate::palette::{self, ColorDepth, PaletteMode, ThemeId, UiTheme};
 
 const RENDER_DEBUG_ENV: &str = "CODEWHALE_TUI_DEBUG";
+const ASCII_SAFE_ENV: &str = "CODEWHALE_ASCII_SAFE";
 const RENDER_DEBUG_SAMPLE_LIMIT: usize = 24;
 
 #[derive(Debug)]
@@ -49,6 +50,7 @@ pub(crate) struct ColorCompatBackend<W: Write> {
     /// the live crossterm query.
     terminal_size: Option<Size>,
     render_debug: Option<RenderDebugLog>,
+    ascii_safe: bool,
 }
 
 impl<W: Write> ColorCompatBackend<W> {
@@ -66,6 +68,7 @@ impl<W: Write> ColorCompatBackend<W> {
             forced_size: None,
             terminal_size: None,
             render_debug: RenderDebugLog::from_env(),
+            ascii_safe: env_flag_enabled(std::env::var(ASCII_SAFE_ENV).ok().as_deref()),
         }
     }
 
@@ -118,6 +121,9 @@ impl<W: Write> Backend for ColorCompatBackend<W> {
                     self.theme_id,
                     &self.active_ui_theme,
                 );
+                if self.ascii_safe {
+                    adapt_cell_symbol_for_ascii(&mut cell);
+                }
                 (x, y, cell)
             })
             .collect::<Vec<_>>();
@@ -269,10 +275,36 @@ impl RenderDebugLog {
 }
 
 fn render_debug_enabled_from_value(value: Option<&str>) -> bool {
+    env_flag_enabled(value)
+}
+
+fn env_flag_enabled(value: Option<&str>) -> bool {
     matches!(
         value.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
         Some("1" | "true" | "yes" | "on")
     )
+}
+
+fn adapt_cell_symbol_for_ascii(cell: &mut Cell) {
+    let replacement = match cell.symbol() {
+        "─" | "━" | "═" | "╌" | "╍" => "-",
+        "│" | "┃" | "║" | "╎" | "╏" => "|",
+        "┌" | "┐" | "└" | "┘" | "╭" | "╮" | "╰" | "╯" | "├" | "┤" | "┬" | "┴" | "┼" => {
+            "+"
+        }
+        "▶" | "▸" | "›" | "❯" | "→" | "↗" => ">",
+        "▼" | "▾" | "↓" => "v",
+        "▲" | "△" | "↑" => "^",
+        "◆" | "◇" | "♦" => "*",
+        "■" | "□" | "▪" | "▫" => "#",
+        "●" | "○" | "∘" | "•" | "·" => ".",
+        "★" | "☆" => "*",
+        "✓" | "✔" => "Y",
+        "✕" | "×" | "⊘" => "X",
+        "…" => ".",
+        _ => return,
+    };
+    cell.set_symbol(replacement);
 }
 
 fn render_debug_line(
@@ -414,6 +446,25 @@ mod tests {
 
         assert_eq!(cell.fg, Color::Rgb(53, 120, 229));
         assert_eq!(cell.bg, Color::Rgb(11, 21, 38));
+    }
+
+    #[test]
+    fn ascii_safe_symbol_adapter_preserves_meaning_with_narrow_glyphs() {
+        for (rich, safe) in [
+            ("─", "-"),
+            ("│", "|"),
+            ("┌", "+"),
+            ("▶", ">"),
+            ("▼", "v"),
+            ("✓", "Y"),
+            ("✕", "X"),
+        ] {
+            let mut cell = Cell::default();
+            cell.set_symbol(rich);
+            adapt_cell_symbol_for_ascii(&mut cell);
+            assert_eq!(cell.symbol(), safe, "{rich} should map to {safe}");
+            assert!(cell.symbol().is_ascii());
+        }
     }
 
     #[test]

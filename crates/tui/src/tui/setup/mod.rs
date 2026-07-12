@@ -14,7 +14,7 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Padding, Paragraph, Widget, Wrap},
+    widgets::{Paragraph, Widget, Wrap},
 };
 
 use crate::config::{Config, has_api_key, has_api_key_for};
@@ -26,8 +26,8 @@ use crate::prompts::{
 use crate::tui::app::App;
 use crate::tui::onboarding;
 use crate::tui::views::{
-    ActionHint, ModalKind, ModalView, ViewAction, ViewEvent, centered_modal_area,
-    render_modal_footer, render_modal_surface,
+    ActionHint, ModalKind, ModalView, ViewAction, ViewEvent, render_modal_footer,
+    render_panel_scroll_rail, render_underwater_surface,
 };
 
 use codewhale_config::{
@@ -2294,33 +2294,20 @@ impl ModalView for SetupWizardView {
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer) {
-        let popup_area = centered_modal_area(area, 92, 30, 56, 16);
-        render_modal_surface(area, popup_area, buf);
         let progress = format!(
             "{} {}/{}",
             tr(self.locale, MessageId::SetupWizardProgress),
             self.selected + 1,
             STEP_SPECS.len()
         );
-        let block = Block::default()
-            .title(Line::from(Span::styled(
-                format!(" {} ", tr(self.locale, MessageId::SetupWizardTitle)),
-                Style::default()
-                    .fg(palette::WHALE_ACCENT_PRIMARY)
-                    .add_modifier(Modifier::BOLD),
-            )))
-            .title_bottom(Line::from(Span::styled(
-                format!(" {progress} "),
-                Style::default()
-                    .fg(palette::TEXT_MUTED)
-                    .add_modifier(Modifier::BOLD),
-            )))
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(palette::BORDER_COLOR))
-            .style(Style::default().bg(palette::WHALE_PANEL))
-            .padding(Padding::new(2, 2, 1, 1));
-        let inner = block.inner(popup_area);
-        block.render(popup_area, buf);
+        let inner = render_underwater_surface(
+            area,
+            buf,
+            format!(
+                "{} · {progress}",
+                tr(self.locale, MessageId::SetupWizardTitle)
+            ),
+        );
         let mut hints = vec![
             ActionHint::new("B", tr(self.locale, MessageId::SetupActionBack).to_string()),
             ActionHint::new(
@@ -2474,6 +2461,8 @@ impl ModalView for SetupWizardView {
         let visible_rows = usize::from(content_area.height).max(1);
         let max_scroll = visual_rows.saturating_sub(visible_rows);
         let scroll = self.body_scroll.min(max_scroll);
+        let content_area =
+            render_panel_scroll_rail(content_area, buf, visual_rows, scroll, visible_rows, true);
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
             .scroll((scroll as u16, 0))

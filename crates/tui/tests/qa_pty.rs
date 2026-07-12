@@ -47,7 +47,7 @@ fn boot_minimal_without_retry() -> anyhow::Result<(qa_harness::harness::SealedWo
 fn spawn_minimal(
     ws: qa_harness::harness::SealedWorkspace,
 ) -> anyhow::Result<(qa_harness::harness::SealedWorkspace, Harness)> {
-    let h = Harness::builder(Harness::cargo_bin("codewhale-tui"))
+    let mut h = Harness::builder(Harness::cargo_bin("codewhale-tui"))
         .cwd(ws.workspace())
         .clear_env()
         .seal_home(ws.home())
@@ -71,7 +71,18 @@ fn spawn_minimal(
         ])
         .size(40, 140)
         .spawn()?;
+    enter_launch_session(&mut h)?;
     Ok((ws, h))
+}
+
+/// The product now starts at a real pre-session launch surface. PTY scenarios
+/// below exercise composer/runtime behavior, so cross that boundary exactly
+/// as a user does instead of bypassing the launch contract with test flags.
+fn enter_launch_session(h: &mut Harness) -> anyhow::Result<()> {
+    h.wait_for_text("New session", BOOT_TIMEOUT)?;
+    h.send(keys::key::enter())?;
+    h.wait_for_text(COMPOSER_READY_TEXT, BOOT_TIMEOUT)?;
+    Ok(())
 }
 
 fn write_skill(root: std::path::PathBuf, name: &str, description: &str) -> anyhow::Result<()> {
@@ -313,7 +324,7 @@ fn work_and_permission_are_visible_at_release_terminal_sizes() -> anyhow::Result
             .size(rows, cols)
             .spawn()?;
 
-        h.wait_for_text(COMPOSER_READY_TEXT, BOOT_TIMEOUT)?;
+        enter_launch_session(&mut h)?;
         h.send(keys::key::text(&format!(
             "/load {}",
             session_path.to_string_lossy()
@@ -382,7 +393,7 @@ fn cancelled_bang_shell_settles_transcript_card() -> anyhow::Result<()> {
         .size(32, 120)
         .spawn()?;
 
-    h.wait_for_text(COMPOSER_READY_TEXT, BOOT_TIMEOUT)?;
+    enter_launch_session(&mut h)?;
     let command = "! echo $$ > shell.pid; sleep 30 & echo $! > sleep.pid; \
                    echo CWQA_SHELL_STARTED; wait";
     h.send(keys::key::text(command))?;
@@ -456,7 +467,7 @@ fn skills_menu_shows_local_and_global_skills() -> anyhow::Result<()> {
         .size(40, 140)
         .spawn()?;
 
-    h.wait_for_text(COMPOSER_READY_TEXT, BOOT_TIMEOUT)?;
+    enter_launch_session(&mut h)?;
     h.send(keys::key::text("/skills"))?;
     h.wait_for_text("/skills", KEY_TIMEOUT)?;
     h.wait_for_idle(Duration::from_millis(300), Duration::from_secs(2))?;

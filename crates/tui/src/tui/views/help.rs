@@ -20,7 +20,7 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Padding, Paragraph, Widget},
+    widgets::{Paragraph, Widget},
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -29,8 +29,8 @@ use crate::localization::{Locale, MessageId, tr};
 use crate::palette;
 use crate::tui::keybindings::KEYBINDINGS;
 use crate::tui::views::{
-    ActionHint, ModalKind, ModalView, ViewAction, centered_modal_area, render_modal_footer,
-    render_modal_surface,
+    ActionHint, ModalKind, ModalView, ViewAction, render_modal_footer, render_panel_scroll_rail,
+    render_underwater_surface,
 };
 
 /// Two top-level sections rendered in the overlay.
@@ -265,14 +265,6 @@ fn build_entries(locale: Locale) -> Vec<HelpEntry> {
     entries
 }
 
-fn modal_block() -> Block<'static> {
-    Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(palette::BORDER_COLOR))
-        .style(Style::default().bg(palette::WHALE_BG))
-        .padding(Padding::uniform(1))
-}
-
 fn truncate_to_width(text: &str, max_width: usize) -> String {
     if max_width == 0 {
         return String::new();
@@ -380,23 +372,15 @@ impl ModalView for HelpView {
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer) {
-        let popup_area = centered_modal_area(area, 90, 28, 44, 8);
-
-        render_modal_surface(area, popup_area, buf);
-
-        let block = modal_block().title(Line::from(vec![Span::styled(
+        let inner = render_underwater_surface(
+            area,
+            buf,
             format!(
-                " {} — {} ",
+                "{} — {}",
                 self.tr(MessageId::HelpTitle),
                 self.tr(MessageId::HelpSubtitle)
             ),
-            Style::default()
-                .fg(palette::WHALE_ACCENT_PRIMARY)
-                .add_modifier(Modifier::BOLD),
-        )]));
-
-        let inner = block.inner(popup_area);
-        block.render(popup_area, buf);
+        );
 
         // The action footer wraps inside the modal body (#3732) rather than the
         // single-line border title that silently clipped hints at narrow
@@ -502,6 +486,17 @@ impl ModalView for HelpView {
             }
         }
 
+        let rows = self.render_rows();
+        let visible_rows = content.height.saturating_sub(3) as usize;
+        let row_start = Self::visible_row_start(&rows, self.selected, visible_rows.max(1));
+        let content = render_panel_scroll_rail(
+            content,
+            buf,
+            rows.len().saturating_add(3),
+            row_start,
+            visible_rows.max(1),
+            true,
+        );
         Paragraph::new(lines).render(content, buf);
     }
 }

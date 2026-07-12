@@ -84,7 +84,7 @@ use crate::tui::command_palette::{
     CommandPaletteView, build_entries as build_command_palette_entries,
 };
 use crate::tui::composer_ui::*;
-use crate::tui::context_inspector::build_context_inspector_text;
+use crate::tui::context_inspector::ContextInspectorView;
 use crate::tui::event_broker::EventBroker;
 use crate::tui::file_picker_relevance;
 use crate::tui::footer_ui::{
@@ -888,7 +888,7 @@ pub async fn run_tui(config: &Config, options: TuiOptions) -> Result<()> {
     sync_config_provider_from_app(config, &app);
     surface_prompt_override_notices(&mut app);
 
-    if options.resume_session_id.is_none() {
+    if options.resume_session_id.is_none() && !app.launch.visible {
         let opened_setup = open_setup_checkpoint_if_due(&mut app, config, options.skip_onboarding);
         // One-time Fleet + Hotbar intro for returning (non-resuming) users.
         // First-time users see it when they finish onboarding. Gated by a
@@ -4239,7 +4239,9 @@ async fn run_event_loop(
                         }
                         OnboardingState::Tips => {
                             app.finish_onboarding_without_feature_intro();
-                            if !open_setup_checkpoint_if_due(app, config, false) {
+                            if !app.launch.visible
+                                && !open_setup_checkpoint_if_due(app, config, false)
+                            {
                                 app.maybe_show_feature_intro();
                             }
                         }
@@ -4289,6 +4291,96 @@ async fn run_event_loop(
                     }
                     _ => {}
                 }
+                continue;
+            }
+
+            // The pre-session launch menu owns every key until the user has
+            // chosen a real session/worktree action. Resume and changelog may
+            // place a shared surface above it; those views keep their normal
+            // handlers while the launch screen remains the stable backdrop.
+            if app.launch.visible {
+                if !app.view_stack.is_empty() {
+                    let events = app.view_stack.handle_key(key);
+                    app.needs_redraw = true;
+                    if handle_view_events(
+                        terminal,
+                        app,
+                        config,
+                        &task_manager,
+                        &mut engine_handle,
+                        &mut web_config_session,
+                        events,
+                    )
+                    .await?
+                    {
+                        return Ok(());
+                    }
+                    continue;
+                }
+
+                match crate::tui::underwater::handle_launch_key(&mut app.launch, key) {
+                    crate::tui::underwater::LaunchAction::None => {}
+                    crate::tui::underwater::LaunchAction::NewSession => {
+                        let result = begin_launch_session(app, None);
+                        if apply_command_result(
+                            terminal,
+                            app,
+                            &mut engine_handle,
+                            &task_manager,
+                            config,
+                            &mut web_config_session,
+                            result,
+                        )
+                        .await?
+                        {
+                            return Ok(());
+                        }
+                    }
+                    crate::tui::underwater::LaunchAction::CreateWorktree(name) => {
+                        app.launch.status = Some("Creating worktree…".to_string());
+                        match provision_launch_worktree(app.workspace.clone(), name).await {
+                            Ok(workspace) => {
+                                let result = begin_launch_session(app, Some(workspace));
+                                if apply_command_result(
+                                    terminal,
+                                    app,
+                                    &mut engine_handle,
+                                    &task_manager,
+                                    config,
+                                    &mut web_config_session,
+                                    result,
+                                )
+                                .await?
+                                {
+                                    return Ok(());
+                                }
+                            }
+                            Err(err) => {
+                                app.launch.status = Some(format!("Worktree failed: {err}"));
+                            }
+                        }
+                    }
+                    crate::tui::underwater::LaunchAction::Resume => {
+                        if app.launch.workspace_session_count == 0 {
+                            app.launch.status =
+                                Some("No saved sessions for this workspace.".to_string());
+                        } else {
+                            app.view_stack.push(SessionPickerView::new(&app.workspace));
+                        }
+                    }
+                    crate::tui::underwater::LaunchAction::Changelog => {
+                        open_text_pager(
+                            app,
+                            "Changelog".to_string(),
+                            include_str!("../../../../CHANGELOG.md").to_string(),
+                        );
+                    }
+                    crate::tui::underwater::LaunchAction::Quit => {
+                        let _ = engine_handle.send(Op::Shutdown).await;
+                        return Ok(());
+                    }
+                }
+                app.needs_redraw = true;
                 continue;
             }
 
@@ -8153,18 +8245,98 @@ fn open_text_pager(app: &mut App, title: String, content: String) {
     ));
 }
 
+fn launch_worktree_slug(requested: &str) -> String {
+    let requested = requested.trim();
+    if requested.is_empty() {
+        return format!("session-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S"));
+    }
+    let mut slug = String::new();
+    let mut separator = false;
+    for ch in requested.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+            separator = false;
+        } else if matches!(ch, '-' | '_' | ' ' | '/' | '.') && !slug.is_empty() && !separator {
+            slug.push('-');
+            separator = true;
+        }
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    if slug.is_empty() {
+        format!("session-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S"))
+    } else {
+        slug
+    }
+}
+
+fn launch_worktree_spec(
+    workspace: &std::path::Path,
+    requested: &str,
+) -> Result<codewhale_lane::WorktreeProvision> {
+    let output = std::process::Command::new("git")
+        .current_dir(workspace)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .context("inspect Git repository for new worktree")?;
+    if !output.status.success() {
+        anyhow::bail!("new worktree requires a Git repository");
+    }
+    let repo_root = PathBuf::from(String::from_utf8(output.stdout)?.trim());
+    let repo_name = repo_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("workspace");
+    let slug = launch_worktree_slug(requested);
+    let parent = repo_root.parent().unwrap_or(repo_root.as_path());
+    let path = parent
+        .join(".codewhale-worktrees")
+        .join(format!("{repo_name}-{slug}"));
+    if path.exists() {
+        anyhow::bail!("worktree path already exists: {}", path.display());
+    }
+    Ok(codewhale_lane::WorktreeProvision {
+        repo_root,
+        branch: format!("codex/{slug}"),
+        path,
+        base_ref: Some("HEAD".to_string()),
+    })
+}
+
+async fn provision_launch_worktree(workspace: PathBuf, requested: String) -> Result<PathBuf> {
+    let spec = launch_worktree_spec(&workspace, &requested)?;
+    let provisioned =
+        tokio::task::spawn_blocking(move || codewhale_lane::provision_worktree(&spec))
+            .await
+            .context("new worktree task failed")??;
+    Ok(provisioned.path)
+}
+
+fn begin_launch_session(app: &mut App, workspace: Option<PathBuf>) -> commands::CommandResult {
+    if let Some(workspace) = workspace {
+        app.workspace = workspace;
+    }
+    let session_id = uuid::Uuid::new_v4().to_string();
+    app.current_session_id = Some(session_id.clone());
+    app.current_session_metadata = None;
+    app.session_title = Some("New Session".to_string());
+    app.launch.visible = false;
+    app.launch.status = None;
+    app.status_message = None;
+    commands::CommandResult::action(AppAction::SyncSession {
+        session_id: Some(session_id),
+        messages: Vec::new(),
+        system_prompt: None,
+        model: app.model.clone(),
+        workspace: app.workspace.clone(),
+        mode: app.mode,
+    })
+}
+
 pub(crate) fn open_context_inspector(app: &mut App) {
-    let width = app
-        .viewport
-        .last_transcript_area
-        .map(|area| area.width)
-        .unwrap_or(80);
-    let content = build_context_inspector_text(app, app.ui_locale);
-    app.view_stack.push(PagerView::from_text(
-        tr(app.ui_locale, MessageId::CtxInspTitle),
-        &content,
-        width.saturating_sub(2),
-    ));
+    app.view_stack.push(ContextInspectorView::new(app));
 }
 
 // File-picker relevance scoring moved to `tui/file_picker_relevance.rs`.
@@ -9696,6 +9868,7 @@ fn render_classic_header(area: Rect, buf: &mut Buffer, app: &App) {
 fn render(f: &mut Frame, app: &mut App, config: &Config) {
     let size = f.area();
     let classic_shell = app.ocean_treatment.eq_ignore_ascii_case("classic");
+    app.sidebar_hover = crate::tui::app::SidebarHoverState::default();
 
     // Clear entire area with the configured app background.
     let background = Block::default().style(Style::default().bg(app.ui_theme.surface_bg));
@@ -9704,6 +9877,15 @@ fn render(f: &mut Frame, app: &mut App, config: &Config) {
     // Show onboarding screen if needed
     if app.onboarding != OnboardingState::None {
         onboarding::render(f, size, app);
+        return;
+    }
+
+    if app.launch.visible {
+        crate::tui::underwater::render_launch_screen(size, f.buffer_mut(), app);
+        if !app.view_stack.is_empty() {
+            let buf = f.buffer_mut();
+            app.view_stack.render(size, buf);
+        }
         return;
     }
 
@@ -9720,7 +9902,7 @@ fn render(f: &mut Frame, app: &mut App, config: &Config) {
     if !mention_menu_entries.is_empty() && app.mention_menu_selected >= mention_menu_entries.len() {
         app.mention_menu_selected = mention_menu_entries.len().saturating_sub(1);
     }
-    let top_work_strip_height = super::sidebar::top_work_strip_height(app, size.width);
+    let top_work_strip_height = super::sidebar::top_work_strip_height(app, size.width, size.height);
 
     // Defensive two-pass layout: pin the header to the absolute top row,
     // then split the remaining body area for chat / preview / composer /
@@ -9755,15 +9937,40 @@ fn render(f: &mut Frame, app: &mut App, config: &Config) {
     // "messages typed during a running turn vanish" complaint by giving the
     // user immediate visible feedback above the composer.
     let pending_preview = build_pending_input_preview(app);
-    let preview_height = pending_preview.desired_height(size.width);
+    let desired_preview_height = pending_preview.desired_height(size.width);
 
     // WorkflowPanel unified activity surface (#4121). Collapsed to one row
     // while finished, expanded while running; zero height when no panel.
-    let workflow_panel_height = app
+    let desired_workflow_panel_height = app
         .workflow_panel
         .as_ref()
         .map(|panel| panel.desired_height(size.width))
         .unwrap_or(0);
+    let auxiliary_budget = body_height.saturating_sub(
+        top_work_strip_height
+            .saturating_add(MIN_CHAT_HEIGHT)
+            .saturating_add(composer_height)
+            .saturating_add(footer_height),
+    );
+    // Preserve the direct send-now hint when the terminal has breathing room,
+    // while keeping the release-floor layout to three compact rows.
+    let preview_cap = if size.height >= 20 { 4 } else { 3 };
+    let preview_height = desired_preview_height.min(auxiliary_budget.min(preview_cap));
+    let workflow_panel_height =
+        desired_workflow_panel_height.min(auxiliary_budget.saturating_sub(preview_height));
+
+    let (composer_slot, footer_slot) = if classic_shell { (4, 5) } else { (5, 4) };
+    let tail_constraints = if classic_shell {
+        [
+            Constraint::Length(composer_height),
+            Constraint::Length(footer_height),
+        ]
+    } else {
+        [
+            Constraint::Length(footer_height),
+            Constraint::Length(composer_height),
+        ]
+    };
 
     let body_chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -9773,8 +9980,8 @@ fn render(f: &mut Frame, app: &mut App, config: &Config) {
             Constraint::Min(1),                        // Chat area
             Constraint::Length(workflow_panel_height), // Workflow panel (#4121)
             Constraint::Length(preview_height),        // Pending input preview (0 if empty)
-            Constraint::Length(composer_height),       // Composer
-            Constraint::Length(footer_height),         // Footer
+            tail_constraints[0],                       // Footer/composer order by shell
+            tail_constraints[1],                       // Composer/footer order by shell
         ])
         .split(body_area);
 
@@ -9898,12 +10105,12 @@ fn render(f: &mut Frame, app: &mut App, config: &Config) {
             &mention_menu_entries,
         );
         let buf = f.buffer_mut();
-        composer_widget.render(body_chunks[4], buf);
-        composer_widget.cursor_pos(body_chunks[4])
+        composer_widget.render(body_chunks[composer_slot], buf);
+        composer_widget.cursor_pos(body_chunks[composer_slot])
     };
-    app.viewport.last_composer_area = Some(body_chunks[4]);
+    app.viewport.last_composer_area = Some(body_chunks[composer_slot]);
     {
-        let area = body_chunks[4];
+        let area = body_chunks[composer_slot];
         let composer_widget = ComposerWidget::new(
             app,
             composer_max_height,
@@ -9964,14 +10171,22 @@ fn render(f: &mut Frame, app: &mut App, config: &Config) {
     }
 
     if classic_shell {
-        render_footer(f, body_chunks[5], app);
+        render_footer(f, body_chunks[footer_slot], app);
     } else {
-        crate::tui::underwater::render_footer(body_chunks[5], f.buffer_mut(), app);
+        crate::tui::underwater::render_footer(body_chunks[footer_slot], f.buffer_mut(), app);
     }
     // Toast stack overlay (#439): when multiple status toasts are queued,
     // surface the older ones as a 1-2 line strip above the footer so a
     // burst of events isn't collapsed to a single visible message.
-    render_toast_stack_overlay(f, size, body_chunks[4], body_chunks[5], app);
+    if classic_shell {
+        render_toast_stack_overlay(
+            f,
+            size,
+            body_chunks[composer_slot],
+            body_chunks[footer_slot],
+            app,
+        );
+    }
 
     // Decision card overlay (v0.8.43 truth-surface). When a decision card is
     // active, render it centered on top of the transcript.
@@ -9998,6 +10213,8 @@ fn render(f: &mut Frame, app: &mut App, config: &Config) {
         // are static and skip this refresh.
         if app.view_stack.top_kind() == Some(ModalKind::LiveTranscript) {
             refresh_live_transcript_overlay(app);
+        } else if app.view_stack.top_kind() == Some(ModalKind::ContextInspector) {
+            refresh_context_inspector_overlay(app);
         }
         let buf = f.buffer_mut();
         app.view_stack.render(size, buf);
@@ -10064,6 +10281,16 @@ fn refresh_live_transcript_overlay(app: &mut App) {
         return;
     };
     if let Some(typed) = overlay.as_any_mut().downcast_mut::<LiveTranscriptOverlay>() {
+        typed.refresh_from_app(app);
+    }
+    app.view_stack.push_boxed(overlay);
+}
+
+fn refresh_context_inspector_overlay(app: &mut App) {
+    let Some(mut overlay) = app.view_stack.pop() else {
+        return;
+    };
+    if let Some(typed) = overlay.as_any_mut().downcast_mut::<ContextInspectorView>() {
         typed.refresh_from_app(app);
     }
     app.view_stack.push_boxed(overlay);
@@ -10464,6 +10691,8 @@ async fn handle_view_events(
                                 crate::session_manager::truncate_id(&session_id)
                             ));
                         }
+                        app.launch.visible = false;
+                        app.launch.status = None;
                     }
                     Err(err) => {
                         app.status_message = Some(format!(
