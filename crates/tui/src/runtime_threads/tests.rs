@@ -188,6 +188,41 @@ async fn aggregate_usage_keeps_codex_tokens_without_api_dollar_pricing() -> Resu
 }
 
 #[tokio::test]
+async fn aggregate_usage_prices_each_turn_at_its_recorded_time() -> Result<()> {
+    let manager = test_manager(test_runtime_dir())?;
+    let mut thread = sample_thread("thr_historical_pricing");
+    thread.model = "claude-sonnet-5".to_string();
+    manager.store.save_thread(&thread)?;
+
+    let usage = Usage {
+        input_tokens: 1_000_000,
+        output_tokens: 0,
+        ..Usage::default()
+    };
+    for (turn_id, created_at) in [
+        ("turn_intro", "2026-08-31T23:59:59Z"),
+        ("turn_standard", "2026-09-01T00:00:00Z"),
+    ] {
+        let mut turn = sample_turn(&thread.id, turn_id, RuntimeTurnStatus::Completed);
+        turn.created_at = created_at.parse().expect("recorded turn time");
+        turn.usage = Some(usage.clone());
+        turn.effective_provider = Some(ApiProvider::Anthropic.as_str().to_string());
+        turn.effective_model = Some("claude-sonnet-5".to_string());
+        manager.store.save_turn(&turn)?;
+    }
+
+    let report = manager
+        .aggregate_usage(None, None, UsageGroupBy::Model)
+        .await?;
+
+    assert_eq!(report.totals.turns, 2);
+    assert!((report.totals.cost_usd - 5.0).abs() < f64::EPSILON);
+    assert_eq!(report.buckets.len(), 1);
+    assert!((report.buckets[0].cost_usd - 5.0).abs() < f64::EPSILON);
+    Ok(())
+}
+
+#[tokio::test]
 async fn aggregate_usage_prices_only_stepfun_payg_surface() -> Result<()> {
     let manager = test_manager(test_runtime_dir())?;
     let mut thread = sample_thread("thr_stepfun_surfaces");

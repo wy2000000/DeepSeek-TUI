@@ -12,20 +12,13 @@
 //! math. The `scorecard` subcommand is a thin I/O wrapper over this module.
 
 use chrono::{DateTime, Utc};
-use codewhale_config::pricing::{Currency, OfferingPricing, TokenUsage};
 use serde::{Deserialize, Serialize};
 
-use crate::config::{
-    ApiProvider, DEEPSEEK_ALIAS_REPLACEMENT, DEEPSEEK_ALIAS_RETIREMENT_UTC,
-    canonical_model_id_for_provider, canonical_model_name,
-};
+use crate::config::ApiProvider;
+#[cfg(test)]
+use crate::config::{DEEPSEEK_ALIAS_REPLACEMENT, DEEPSEEK_ALIAS_RETIREMENT_UTC};
 use crate::models::Usage;
-use crate::pricing::{
-    calculate_turn_cost_estimate_for_billing_surface,
-    calculate_turn_cost_estimate_for_provider, calculate_turn_cost_estimate_for_provider_at,
-    token_usage_for_pricing,
-};
-use crate::provider_lake::catalog_offering_for_model;
+use crate::pricing::{calculate_turn_cost_estimate_for_route_at, token_usage_for_pricing};
 
 /// One turn's normalized token economics.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -173,7 +166,6 @@ fn provider_scoped_cost(
     provider: ApiProvider,
     model: &str,
     usage: &Usage,
-    token_usage: &TokenUsage,
     created_at: Option<&DateTime<Utc>>,
     billing_surface: Option<&str>,
 ) -> AvailableCost {
@@ -183,139 +175,30 @@ fn provider_scoped_cost(
     );
     let normalized_model = model.trim();
     let model_lower = normalized_model.to_ascii_lowercase();
-    let canonical_model = if direct_deepseek {
-        canonical_model_name(normalized_model)
-            .unwrap_or(normalized_model)
-            .to_string()
-    } else if provider == ApiProvider::Arcee {
-        // Keep the direct Arcee route separate from OpenRouter's
-        // `arcee-ai/...` namespace while accepting Arcee's own aliases.
-        canonical_model_id_for_provider(provider, normalized_model)
-            .unwrap_or_else(|| normalized_model.to_string())
-    } else {
-        normalized_model.to_string()
-    };
-    let catalog_model = if direct_deepseek
-        && matches!(model_lower.as_str(), "deepseek-chat" | "deepseek-reasoner")
-    {
-        let Some(created_at) = created_at else {
-            return AvailableCost::default();
-        };
-        let Ok(retirement) = DateTime::parse_from_rfc3339(DEEPSEEK_ALIAS_RETIREMENT_UTC) else {
-            return AvailableCost::default();
-        };
-        if created_at >= &retirement.with_timezone(&Utc) {
-            return AvailableCost::default();
-        }
-        DEEPSEEK_ALIAS_REPLACEMENT.to_string()
-    } else {
-        canonical_model
+    let needs_recorded_time = (direct_deepseek
+        && matches!(model_lower.as_str(), "deepseek-chat" | "deepseek-reasoner"))
+        || (provider == ApiProvider::Anthropic && model_lower == "claude-sonnet-5");
+    let recorded_at = match (created_at, needs_recorded_time) {
+        (Some(recorded_at), _) => recorded_at.to_owned(),
+        (None, true) => return AvailableCost::default(),
+        (None, false) => Utc::now(),
     };
 
-    // StepFun's standard API and Step Plan share provider/model ids but use
-    // unrelated billing systems. Gate every StepFun route on the recorded,
-    // endpoint-derived surface before catalog lookup so a future catalog row
-    // cannot make subscription usage look like PAYG token spend.
-    if provider == ApiProvider::Stepfun {
-        return calculate_turn_cost_estimate_for_billing_surface(
-            provider,
-            &catalog_model,
-            billing_surface,
-            usage,
-        )
-        .map_or_else(AvailableCost::default, |cost| AvailableCost {
-            usd: Some(cost.usd),
-            cny: None,
-        });
-    }
-
-    let Some(offering) = catalog_offering_for_model(provider, &catalog_model) else {
-        return AvailableCost::default();
-    };
-    let catalog_model_lower = catalog_model.to_ascii_lowercase();
-
-    // Direct DeepSeek routes retain the repository's hand-sourced, time-aware
-    // USD+CNY table. Requiring an exact provider offering first prevents a
-    // foreign wire id from matching merely because its text contains
-    // "deepseek".
-    if direct_deepseek {
-        return calculate_turn_cost_estimate_for_provider(provider, &catalog_model, usage)
-            .map_or_else(AvailableCost::default, |cost| AvailableCost {
-                usd: Some(cost.usd),
-                cny: Some(cost.cny),
-            });
-    }
-
-    // The first-party Anthropic route has a documented Sonnet 5 introductory
-    // window that the bundled catalog's static standard rate cannot express.
-    // Keep the exact route gate above, then reuse the existing time-aware row.
-    if provider == ApiProvider::Anthropic && model_lower == "claude-sonnet-5" {
-        let Some(created_at) = created_at else {
-            return AvailableCost::default();
-        };
-        return calculate_turn_cost_estimate_for_provider_at(
-            provider,
-            &catalog_model,
-            usage,
-            created_at.to_owned(),
-        )
-        .map_or_else(AvailableCost::default, |cost| AvailableCost {
-            usd: Some(cost.usd),
-            cny: None,
-        });
-    }
-
-    let Some(mut pricing) = OfferingPricing::from_catalog_offering(&offering) else {
-        // The provider/model pair is already proven by the exact catalog gate
-        // above. Only fall back for the direct routes whose sourced legacy rows
-        // are authoritative; aggregator rows can bill the same family at a
-        // different rate and must remain unpriced when their own cost is absent.
-        let has_authoritative_legacy_row = matches!(
-            (provider, catalog_model_lower.as_str()),
-            (ApiProvider::Arcee, "trinity-mini") | (ApiProvider::Minimax, "minimax-m2.7")
-        );
-        if !has_authoritative_legacy_row {
-            return AvailableCost::default();
-        }
-        return calculate_turn_cost_estimate_for_provider(provider, &catalog_model, usage)
-            .map_or_else(AvailableCost::default, |cost| AvailableCost {
-                usd: Some(cost.usd),
-                cny: None,
-            });
-    };
-    // These exact first-party routes document that cache hits receive no
-    // discount, so the offering's input rate is authoritative. Do not infer
-    // this for arbitrary catalog rows: an omitted cache rate may be unknown.
-    let cache_uses_input_rate = matches!(
-        (provider, catalog_model_lower.as_str()),
-        (ApiProvider::Openai, "gpt-5.5-pro") | (ApiProvider::Arcee, "trinity-large-thinking")
-    );
-    if token_usage.cache_read > 0
-        && pricing.cache_read_per_million.is_none()
-        && cache_uses_input_rate
-    {
-        pricing.cache_read_per_million = pricing.input_per_million;
-    }
-    if token_usage.cache_write > 0
-        && pricing.cache_write_per_million.is_none()
-        && cache_uses_input_rate
-    {
-        pricing.cache_write_per_million = pricing.input_per_million;
-    }
-    let Some(amount) = pricing.estimate_cost(token_usage) else {
-        return AvailableCost::default();
-    };
-    match &pricing.currency {
-        Currency::Usd => AvailableCost {
-            usd: Some(amount),
-            cny: None,
-        },
-        Currency::Cny => AvailableCost {
-            usd: None,
-            cny: Some(amount),
-        },
-        Currency::Other(_) => AvailableCost::default(),
-    }
+    // The pricing layer owns the exact provider/model catalog gate, explicit
+    // first-party hand-price allowlist, cache-class completeness checks, and
+    // endpoint-derived StepFun surface. Keeping one route-aware path prevents
+    // the scorecard from drifting back to model-only pricing.
+    calculate_turn_cost_estimate_for_route_at(
+        provider,
+        normalized_model,
+        billing_surface,
+        usage,
+        recorded_at,
+    )
+    .map_or_else(AvailableCost::default, |cost| AvailableCost {
+        usd: Some(cost.usd),
+        cny: direct_deepseek.then_some(cost.cny),
+    })
 }
 
 impl Scorecard {
@@ -372,7 +255,6 @@ impl Scorecard {
                         provider,
                         turn.model,
                         turn.usage,
-                        &classes,
                         turn.created_at,
                         turn.billing_surface,
                     )
@@ -699,6 +581,33 @@ mod tests {
         assert_eq!(json["metrics"]["unpriced_turns"], 2);
         assert_eq!(json["metrics"]["cost_complete"], false);
         assert_eq!(json["metrics"]["cny_cost_complete"], false);
+    }
+
+    #[test]
+    fn first_party_hand_price_survives_a_missing_catalog_offering() {
+        let u = usage(1_000_000, 0, 0);
+        let turns = [
+            TurnInput {
+                turn_id: "openai-api".into(),
+                created_at: None,
+                provider: Some("openai"),
+                model: "gpt-5-codex".into(),
+                usage: &u,
+            },
+            TurnInput {
+                turn_id: "foreign-route".into(),
+                created_at: None,
+                provider: Some("ollama"),
+                model: "gpt-5-codex".into(),
+                usage: &u,
+            },
+        ];
+
+        let card = Scorecard::from_turns(&turns);
+
+        assert!(!card.per_turn[0].cost_unpriced);
+        assert!((card.per_turn[0].cost_usd - 1.25).abs() < f64::EPSILON);
+        assert!(card.per_turn[1].cost_unpriced);
     }
 
     #[test]

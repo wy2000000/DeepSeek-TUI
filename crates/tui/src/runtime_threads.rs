@@ -1448,11 +1448,12 @@ impl RuntimeThreadManager {
                 let provider = ApiProvider::parse(provider_label);
                 let cost = provider
                     .and_then(|provider| {
-                        crate::pricing::calculate_turn_cost_estimate_for_billing_surface(
+                        crate::pricing::calculate_turn_cost_estimate_for_route_at(
                             provider,
                             model,
                             turn.effective_billing_surface.as_deref(),
                             usage,
+                            turn.created_at,
                         )
                     })
                     .map(|estimate| estimate.usd)
