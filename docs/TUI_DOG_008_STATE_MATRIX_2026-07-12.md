@@ -15,12 +15,12 @@
 > "Still needs Hunter eyeball" list below still applies, now with the new
 > color grammar and verifying tick added to it.
 
-Dated receipt: 2026-07-12  
-Lane: `codex/underwater-tui-20260711` @ worktree `codewhale-underwater-tui`  
-Primary reference: `/Volumes/VIXinSSD/CW/tui-fix/cw-underwater-take.html`  
+Dated receipt: 2026-07-12
+Lane: `codex/underwater-tui-20260711` @ worktree `codewhale-underwater-tui`
+Primary reference: `/Volumes/VIXinSSD/CW/tui-fix/cw-underwater-take.html`
 Scope: visual metamorphosis / shell grammar (not Fleet, keybinding, or hitbox siblings)
 
-Status values: `implemented` | `partial` | `missing`  
+Status values: `implemented` | `partial` | `missing`
 Captures: hierarchy design aid at
 `/Volumes/VIXinSSD/CW/backups/tui-dog-008-2026-07-12/tui-dog-008-working-hierarchy.png`
 (not acceptance proof). No dogfood reinstall on this pass. Ownership is code

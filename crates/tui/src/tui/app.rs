@@ -3588,6 +3588,7 @@ impl App {
         self.approval_policy_locked
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn approval_policy_requirements_managed(&self) -> bool {
         self.approval_policy_requirements_managed

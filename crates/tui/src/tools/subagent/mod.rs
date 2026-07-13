@@ -5991,6 +5991,7 @@ async fn insert_subagent_full_transcript_handle(
 /// live-only snapshot name meant Open could only show a compact status card
 /// until the worker stopped, which is exactly when observing it is least
 /// useful.
+#[allow(clippy::too_many_arguments)]
 async fn publish_live_subagent_transcript(
     runtime: &SubAgentRuntime,
     agent_id: &str,

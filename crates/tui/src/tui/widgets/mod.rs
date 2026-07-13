@@ -830,24 +830,36 @@ fn render_ambient_life(
     let heading_sample_ms = u128::from(crate::tui::ui::UI_UNDERWATER_ANIMATION_MS);
     let previous_elapsed_ms = elapsed_ms.saturating_sub(heading_sample_ms);
     let next_elapsed_ms = elapsed_ms.saturating_add(heading_sample_ms);
-    let previous_drift_a = animated
-        .then(|| ambient_ping_pong(previous_elapsed_ms, 480, span_a, 0).0)
-        .unwrap_or(drift_a);
-    let next_drift_a = animated
-        .then(|| ambient_ping_pong(next_elapsed_ms, 480, span_a, 0).0)
-        .unwrap_or(drift_a);
-    let previous_drift_b = animated
-        .then(|| ambient_ping_pong(previous_elapsed_ms, 560, span_b, 1_900).0)
-        .unwrap_or(drift_b);
-    let next_drift_b = animated
-        .then(|| ambient_ping_pong(next_elapsed_ms, 560, span_b, 1_900).0)
-        .unwrap_or(drift_b);
-    let previous_drift_c = animated
-        .then(|| ambient_ping_pong(previous_elapsed_ms, 640, span_c, 3_700).0)
-        .unwrap_or(drift_c);
-    let next_drift_c = animated
-        .then(|| ambient_ping_pong(next_elapsed_ms, 640, span_c, 3_700).0)
-        .unwrap_or(drift_c);
+    let previous_drift_a = if animated {
+        ambient_ping_pong(previous_elapsed_ms, 480, span_a, 0).0
+    } else {
+        drift_a
+    };
+    let next_drift_a = if animated {
+        ambient_ping_pong(next_elapsed_ms, 480, span_a, 0).0
+    } else {
+        drift_a
+    };
+    let previous_drift_b = if animated {
+        ambient_ping_pong(previous_elapsed_ms, 560, span_b, 1_900).0
+    } else {
+        drift_b
+    };
+    let next_drift_b = if animated {
+        ambient_ping_pong(next_elapsed_ms, 560, span_b, 1_900).0
+    } else {
+        drift_b
+    };
+    let previous_drift_c = if animated {
+        ambient_ping_pong(previous_elapsed_ms, 640, span_c, 3_700).0
+    } else {
+        drift_c
+    };
+    let next_drift_c = if animated {
+        ambient_ping_pong(next_elapsed_ms, 640, span_c, 3_700).0
+    } else {
+        drift_c
+    };
     let rise = if animated {
         u16::try_from((elapsed_ms / 720) % 5).unwrap_or(0)
     } else {

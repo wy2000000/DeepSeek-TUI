@@ -1,8 +1,8 @@
 # TUI dogfood integration check — 2026-07-12
 
-Lane: `/Volumes/VIXinSSD/CW/worktrees/codewhale-underwater-tui`  
-Branch: `codex/underwater-tui-20260711`  
-HEAD (unchanged): `7e760f8ce2422db9130f771a39e4b2842ef96a8c` (ahead 2 of `origin/main`)  
+Lane: `/Volumes/VIXinSSD/CW/worktrees/codewhale-underwater-tui`
+Branch: `codex/underwater-tui-20260711`
+HEAD (unchanged): `7e760f8ce2422db9130f771a39e4b2842ef96a8c` (ahead 2 of `origin/main`)
 Agent role: integration / conflict-check only. **No commit, push, merge, tag, reset, or clean.**
 
 Related sibling receipts (do not treat as install proof):

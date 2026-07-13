@@ -32,4 +32,3 @@ Do not delete Classic or its sidebar until all of these are true:
 
 After those gates, remove compatibility modules in a dedicated cleanup change;
 do not mix their deletion with feature implementation.
-

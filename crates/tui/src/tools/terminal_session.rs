@@ -5,26 +5,39 @@
 //! replacement history. A later process reports the shell as stale/lost and
 //! starts a new identity; it never claims to reattach from a reused PID.
 
+#[cfg(unix)]
 use std::collections::{HashMap, VecDeque};
+#[cfg(unix)]
 use std::io::Write;
+#[cfg(unix)]
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::sync::{Arc, Mutex, OnceLock};
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+#[cfg(unix)]
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+#[cfg(unix)]
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
 use uuid::Uuid;
 
 use super::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec,
-    optional_u64, required_str,
 };
+#[cfg(unix)]
+use super::spec::{optional_u64, required_str};
 
+#[cfg(unix)]
 const BUFFER_LIMIT: usize = 512 * 1024;
+#[cfg(unix)]
 const OUTPUT_LIMIT: usize = 12 * 1024;
+#[cfg(unix)]
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
+#[cfg(unix)]
 const MAX_TIMEOUT_SECS: u64 = 600;
 
 #[cfg(unix)]
@@ -346,6 +359,7 @@ fn take_output(session: &mut TerminalSession) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
+#[cfg(unix)]
 fn prune_output(input: &str) -> String {
     if input.len() <= OUTPUT_LIMIT {
         return input.to_string();
@@ -516,6 +530,7 @@ fn session_result(
     }
 }
 
+#[cfg(unix)]
 fn session_name(input: &serde_json::Value, required: bool) -> Result<&str, ToolError> {
     match input.get("session").and_then(serde_json::Value::as_str) {
         Some(name) if !name.is_empty() => Ok(name),
@@ -525,6 +540,7 @@ fn session_name(input: &serde_json::Value, required: bool) -> Result<&str, ToolE
     }
 }
 
+#[cfg(unix)]
 fn timeout_secs(input: &serde_json::Value, key: &str) -> Duration {
     Duration::from_secs(optional_u64(input, key, DEFAULT_TIMEOUT_SECS).clamp(1, MAX_TIMEOUT_SECS))
 }
@@ -580,10 +596,10 @@ impl ToolSpec for TerminalRunTool {
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         shell_allowed(context)?;
-        let command = required_str(&input, "command")?.to_string();
-        let name = session_name(&input, false)?.to_string();
         #[cfg(unix)]
         {
+            let command = required_str(&input, "command")?.to_string();
+            let name = session_name(&input, false)?.to_string();
             let session =
                 get_or_create(&name, &context.workspace).map_err(ToolError::execution_failed)?;
             let timeout = timeout_secs(&input, "timeout_secs");
@@ -605,6 +621,7 @@ impl ToolSpec for TerminalRunTool {
         }
         #[cfg(not(unix))]
         {
+            let _ = input;
             Ok(unsupported())
         }
     }
@@ -626,10 +643,10 @@ impl ToolSpec for TerminalSendTool {
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         shell_allowed(context)?;
-        let name = session_name(&input, true)?.to_string();
-        let text = required_str(&input, "text")?.as_bytes().to_vec();
         #[cfg(unix)]
         {
+            let name = session_name(&input, true)?.to_string();
+            let text = required_str(&input, "text")?.as_bytes().to_vec();
             let session = find(&name, &context.workspace).map_err(ToolError::execution_failed)?;
             let wait = Duration::from_millis(optional_u64(&input, "wait_ms", 250).min(60_000));
             return tokio::task::spawn_blocking(move || {
@@ -646,6 +663,7 @@ impl ToolSpec for TerminalSendTool {
         }
         #[cfg(not(unix))]
         {
+            let _ = input;
             Ok(unsupported())
         }
     }
@@ -667,9 +685,9 @@ impl ToolSpec for TerminalWaitTool {
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         shell_allowed(context)?;
-        let name = session_name(&input, true)?.to_string();
         #[cfg(unix)]
         {
+            let name = session_name(&input, true)?.to_string();
             let session = find(&name, &context.workspace).map_err(ToolError::execution_failed)?;
             let timeout = timeout_secs(&input, "timeout_secs");
             return tokio::task::spawn_blocking(move || {
@@ -684,6 +702,7 @@ impl ToolSpec for TerminalWaitTool {
         }
         #[cfg(not(unix))]
         {
+            let _ = input;
             Ok(unsupported())
         }
     }
@@ -705,9 +724,9 @@ impl ToolSpec for TerminalCancelTool {
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         shell_allowed(context)?;
-        let name = session_name(&input, true)?.to_string();
         #[cfg(unix)]
         {
+            let name = session_name(&input, true)?.to_string();
             let session = find(&name, &context.workspace).map_err(ToolError::execution_failed)?;
             return tokio::task::spawn_blocking(move || {
                 let marker = {
@@ -756,6 +775,7 @@ impl ToolSpec for TerminalCancelTool {
         }
         #[cfg(not(unix))]
         {
+            let _ = input;
             Ok(unsupported())
         }
     }
@@ -777,9 +797,9 @@ impl ToolSpec for TerminalResetTool {
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         shell_allowed(context)?;
-        let name = session_name(&input, true)?.to_string();
         #[cfg(unix)]
         {
+            let name = session_name(&input, true)?.to_string();
             let old = find(&name, &context.workspace).map_err(ToolError::execution_failed)?;
             let workspace = context.workspace.clone();
             return tokio::task::spawn_blocking(move || {
@@ -796,16 +816,16 @@ impl ToolSpec for TerminalResetTool {
         }
         #[cfg(not(unix))]
         {
+            let _ = input;
             Ok(unsupported())
         }
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
     fn fresh(name: &str) -> SharedSession {
         let session = get_or_create(name, std::path::Path::new("/tmp")).unwrap();
         let mut session_guard = session.lock().unwrap();
@@ -819,7 +839,6 @@ mod tests {
         replacement
     }
 
-    #[cfg(unix)]
     fn run(session: &SharedSession, command: &str, timeout: Duration) -> ToolResult {
         let mut session = session.lock().unwrap();
         start_command(&mut session, command).unwrap();
