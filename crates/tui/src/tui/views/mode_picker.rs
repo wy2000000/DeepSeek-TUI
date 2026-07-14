@@ -20,8 +20,8 @@ use crate::tui::views::{
     render_modal_footer, render_modal_surface,
 };
 
-// Operate is visible because the engine now host-enforces Workflow dispatch and
-// a terminal receipt for non-local requests.
+// Operate is visible because the engine now enforces a coordinator/worker
+// boundary while allowing ordinary conversation and asynchronous dispatch.
 const VISIBLE_MODES: [AppMode; 3] = [AppMode::Agent, AppMode::Plan, AppMode::Operate];
 
 pub struct ModePickerView {
@@ -300,7 +300,7 @@ mod tests {
     }
 
     #[test]
-    fn operate_is_advertised_with_host_enforced_workflow_dispatch() {
+    fn operate_is_advertised_as_a_visible_mode() {
         let (buf, area) = render_at(80, 24);
         let text = rows(&buf, area).join("\n");
         assert!(text.contains("Operate"), "{text}");

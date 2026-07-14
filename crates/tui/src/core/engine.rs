@@ -56,9 +56,6 @@ use crate::tools::subagent::{
 };
 use crate::tools::todo::{SharedTodoList, TodoListSnapshot, new_shared_todo_list};
 use crate::tools::user_input::{UserInputRequest, UserInputResponse};
-use crate::tools::workflow_trigger::{
-    OperateAdmissionDecision, WorkflowTriggerSignals, evaluate_operate_admission,
-};
 use crate::tools::{ToolContext, ToolRegistryBuilder};
 use crate::tui::app::AppMode;
 use crate::utils::spawn_supervised;
@@ -714,57 +711,6 @@ impl Engine {
             AppMode::Operate => prompts::OPERATE_MODE,
         }
         .trim()
-    }
-
-    fn operate_admission(&self, mode: AppMode, content: &str) -> OperateAdmissionDecision {
-        if mode != AppMode::Operate {
-            return OperateAdmissionDecision::LocalOneStep {
-                reason: "mode does not require Operate orchestration",
-            };
-        }
-
-        let mut signals = WorkflowTriggerSignals::product_defaults();
-        signals.auto_start_child_limit = self
-            .api_config
-            .workflow_config()
-            .auto_start_child_limit
-            .try_into()
-            .unwrap_or(usize::MAX);
-        evaluate_operate_admission(content, &signals)
-    }
-
-    /// Fail closed before a provider request when the worker runtime itself is
-    /// unavailable. The turn loop separately enforces Workflow dispatch and a
-    /// terminal run receipt for every non-local Operate request.
-    fn operate_readiness_blocker(
-        &self,
-        mode: AppMode,
-        admission: &OperateAdmissionDecision,
-    ) -> Option<String> {
-        if mode != AppMode::Operate {
-            return None;
-        }
-
-        if admission.allows_local_execution() {
-            return None;
-        }
-
-        let readiness_gap = if !self.config.subagents_enabled
-            || !self.config.features.enabled(Feature::Subagents)
-        {
-            "the sub-agent/Workflow runtime is disabled"
-        } else if self.config.max_subagents == 0 || self.config.launch_concurrency == 0 {
-            "the worker runtime has no launch capacity"
-        } else if self.config.max_spawn_depth == 0 {
-            "worker delegation depth is zero"
-        } else {
-            return None;
-        };
-
-        Some(format!(
-            "Operate readiness blocked: {} requires Fleet/Workflow orchestration, but {readiness_gap}. No provider request or solo tool chain was started. Run `/setup report` and `/setup fleet` to inspect the readiness gap, or switch to Act only for intentionally local execution.",
-            admission.reason()
-        ))
     }
 
     pub(super) async fn emit_compaction_started(
@@ -2510,33 +2456,7 @@ impl Engine {
             })
             .await;
 
-        // Operate is not allowed to silently fall through to Act for work that
-        // is not provably one-step. Reject missing worker infrastructure here;
-        // the turn loop then admits only a host-enforced Workflow path and
-        // requires its terminal receipt before the turn can complete.
-        let operate_admission = self.operate_admission(input_policy.mode, &content);
-        let operate_requires_workflow = !operate_admission.allows_local_execution();
-        turn.operate_requires_workflow = operate_requires_workflow;
-        if let Some(message) = self.operate_readiness_blocker(input_policy.mode, &operate_admission)
-        {
-            let _ = self
-                .tx_event
-                .send(Event::error(ErrorEnvelope::transient(message.clone())))
-                .await;
-            let _ = self
-                .tx_event
-                .send(Event::TurnComplete {
-                    usage: turn.usage.clone(),
-                    status: TurnOutcomeStatus::Failed,
-                    error: Some(message),
-                    tool_catalog: None,
-                    base_url: None,
-                })
-                .await;
-            return;
-        }
-
-        // Apply the host-resolved route budget only after admission succeeds.
+        // Apply the host-resolved route budget before building the request.
         // The model, limits, and compaction policy arrive in one operation so
         // no provider request can observe a partially updated route.
         self.active_route_limits = route_limits;

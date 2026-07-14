@@ -9908,10 +9908,17 @@ async fn attempt_steer_with_queue_fallback(
 async fn queue_follow_up(app: &mut App, message: QueuedMessage) -> Result<()> {
     let display = message.display.clone();
     enqueue_offline_message(app, message);
-    let toast = format!(
-        "Queued: {display} ({} total) — sends after current output; ↑ to edit",
-        app.queued_message_count()
-    );
+    let toast = if app.mode == AppMode::Operate {
+        format!(
+            "Queued task: {display} ({} total) — dispatches next while workers continue; ↑ to edit",
+            app.queued_message_count()
+        )
+    } else {
+        format!(
+            "Queued: {display} ({} total) — sends after current output; ↑ to edit",
+            app.queued_message_count()
+        )
+    };
     app.status_message = Some(toast.clone());
     app.push_status_toast(toast, StatusToastLevel::Info, Some(3_000));
     Ok(())
@@ -9937,6 +9944,13 @@ async fn submit_or_steer_message(
                 (
                     format!("Offline: {count} queued follow-up(s) — ↑ edit last, /queue send <n>"),
                     format!("Offline: queued follow-up ({count} total)"),
+                )
+            } else if app.mode == AppMode::Operate {
+                (
+                    format!(
+                        "{count} queued task(s) — dispatches next while workers continue; ↑ edit last, /queue send <n>"
+                    ),
+                    format!("Queued task ({count} total) — dispatches next"),
                 )
             } else {
                 (
@@ -10126,8 +10140,8 @@ async fn handle_plan_choice(
 /// - `rejected_steers` — engine declined a mid-turn steer (scaffolding;
 ///   no engine path produces these yet but the bucket renders with a distinct
 ///   rejected-steer label).
-/// - `queued_messages` — Enter while busy (offline-mode FIFO); drained at
-///   end-of-turn.
+/// - `queued_messages` — Enter while busy; drained at end-of-turn. In Operate,
+///   the foreground operator dispatches these as additional background tasks.
 fn build_pending_input_preview(app: &App) -> PendingInputPreview {
     let mut preview = PendingInputPreview::new();
     let selected_attachment = app.selected_composer_attachment_index();

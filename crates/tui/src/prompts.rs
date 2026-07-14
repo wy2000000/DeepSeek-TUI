@@ -3343,20 +3343,29 @@ mod tests {
     }
 
     #[test]
-    fn operate_mode_prompt_prefers_workflow_plan_over_handwritten_files() {
-        // #4125 companion: Operate mode matches soft-auto Workflow guidance.
+    fn operate_mode_prompt_keeps_multitask_simple_and_async() {
         for phrase in [
-            "Decide to use Workflow yourself",
-            "does not need to say \"workflow\"",
-            "This looks like a Workflow",
-            "do not ask the operator to write workflow files",
-            "Pass **paths** not file dumps",
-            "Prefer `responseSchema`",
-            "labels and phase titles",
+            "ordinary user messages",
+            "Answer conversation",
+            "dispatch one or more `agent` workers",
+            "background",
+            "Treat each queued user message as another task",
+            "Use `workflow` only when",
+            "Keep internal mechanics internal",
         ] {
             assert!(
                 OPERATE_MODE.contains(phrase),
-                "OPERATE_MODE missing automatic-workflow phrase {phrase:?}"
+                "OPERATE_MODE missing multitask phrase {phrase:?}"
+            );
+        }
+        for implementation_detail in [
+            "risk` is exactly",
+            "parallel([() =>",
+            "terminal Workflow receipt",
+        ] {
+            assert!(
+                !OPERATE_MODE.contains(implementation_detail),
+                "OPERATE_MODE leaks implementation detail {implementation_detail:?}"
             );
         }
     }

@@ -299,9 +299,6 @@ impl Engine {
                 .map(std::string::ToString::to_string),
         );
         let mut goal_continuations_this_turn = 0u32;
-        let mut operate_terminal_receipt = !turn.operate_requires_workflow;
-        let mut operate_retry_requested = false;
-
         // Outer stream-retry counter: when the chunked-transfer connection
         // dies mid-stream and either nothing useful was streamed (#103
         // Phase 3) or the host slept mid-turn (#2990), we silently re-issue
@@ -1315,33 +1312,6 @@ impl Engine {
             }
 
             if tool_uses.is_empty() {
-                if mode == AppMode::Operate
-                    && turn.operate_requires_workflow
-                    && !operate_terminal_receipt
-                {
-                    if !operate_retry_requested {
-                        operate_retry_requested = true;
-                        let notice = "Operate requires this request to run through the Workflow control plane. Call `workflow` with `action=run` (or `action=start` plus `wait=true`) and at least one Fleet task so the host receives a terminal child-backed run receipt. Read-only inspection may precede that call, but direct writes, shell execution, empty workflows, and detached Workflow starts are not admitted.";
-                        let _ = self
-                            .tx_event
-                            .send(Event::status(
-                                "Operate is waiting for a terminal Workflow receipt".to_string(),
-                            ))
-                            .await;
-                        self.add_session_message(self.runtime_text_message_with_turn_metadata(
-                            notice.to_string(),
-                            UserInputProvenance::Runtime,
-                        ))
-                        .await;
-                        turn.next_step();
-                        continue;
-                    }
-
-                    let reason = "Operate ended without a terminal Workflow receipt; no direct Act-style execution was admitted";
-                    let _ = self.tx_event.send(Event::status(reason)).await;
-                    return (TurnOutcomeStatus::Failed, Some(reason.to_string()));
-                }
-
                 match stuck_guard.observe(StepFingerprint::assistant_no_tool(&current_text_visible))
                 {
                     Some(StuckSignal::Warn) => {
@@ -1835,7 +1805,6 @@ impl Engine {
 
                 if blocked_error.is_none()
                     && mode == AppMode::Operate
-                    && turn.operate_requires_workflow
                     && let Some(reason) = operate_tool_blocker(&tool_name, &tool_input, read_only)
                 {
                     blocked_error = Some(ToolError::permission_denied(reason));
@@ -2649,22 +2618,6 @@ impl Engine {
 
                 match outcome.result {
                     Ok(output) => {
-                        if mode == AppMode::Operate
-                            && turn.operate_requires_workflow
-                            && operate_workflow_terminal_receipt(
-                                &outcome.name,
-                                &tool_input,
-                                &output,
-                            )
-                        {
-                            operate_terminal_receipt = true;
-                            let _ = self
-                                .tx_event
-                                .send(Event::status(
-                                    "Operate received a terminal Workflow receipt".to_string(),
-                                ))
-                                .await;
-                        }
                         emit_tool_audit(json!({
                             "event": "tool.result",
                             "tool_id": outcome.id.clone(),
@@ -3079,67 +3032,32 @@ fn plan_mode_blocks_write_capable_tool(tool_name: &str, read_only: bool) -> bool
         || (McpPool::is_mcp_tool(tool_name) && !read_only)
 }
 
-/// Host boundary for non-local Operate turns. Read-only discovery and control
-/// plane tools are allowed, but work must execute inside a Workflow that waits
-/// for a terminal receipt. This prevents a model from treating Operate as Act
-/// with a different label.
-fn operate_tool_blocker(tool_name: &str, input: &Value, read_only: bool) -> Option<String> {
+/// Host boundary for Operate turns. The operator may answer, inspect context,
+/// and coordinate durable workers, but mutating work belongs to those workers.
+/// This is intentionally based on the tool actually requested rather than a
+/// guess derived from the user's prose.
+fn operate_tool_blocker(tool_name: &str, _input: &Value, read_only: bool) -> Option<String> {
     if read_only
         || matches!(
             tool_name,
-            REQUEST_USER_INPUT_NAME | "create_goal" | "update_goal"
+            REQUEST_USER_INPUT_NAME
+                | "create_goal"
+                | "update_goal"
+                | "update_plan"
+                | "todo_write"
+                | "notify"
         )
     {
         return None;
     }
 
-    if tool_name == "workflow" {
-        let action = input
-            .get("action")
-            .and_then(Value::as_str)
-            .unwrap_or("start")
-            .trim()
-            .to_ascii_lowercase();
-        let waits_for_receipt = matches!(action.as_str(), "run" | "wait")
-            || (matches!(action.as_str(), "start" | "spawn" | "")
-                && input.get("wait").and_then(Value::as_bool) == Some(true));
-        if waits_for_receipt || matches!(action.as_str(), "cancel" | "stop" | "abort") {
-            return None;
-        }
-        return Some(
-            "Operate requires a terminal Workflow receipt. Use workflow action=run or action=start with wait=true; detached starts are not admitted for this request."
-                .to_string(),
-        );
+    if tool_name == "workflow" || tool_name == "agent" || tool_name.starts_with("agents/") {
+        return None;
     }
 
     Some(format!(
-        "Operate routes non-local execution through Workflow. Tool '{tool_name}' is write-capable outside that control plane; use workflow action=run with Fleet tasks, or switch to Act for intentionally direct work."
+        "Operate keeps mutating work in workers. Tool '{tool_name}' would execute directly in the parent; dispatch an `agent` for ordinary work, use `workflow` only for staged or gated work, or switch to Act for intentionally local execution."
     ))
-}
-
-fn operate_workflow_terminal_receipt(tool_name: &str, input: &Value, output: &ToolResult) -> bool {
-    if tool_name != "workflow" {
-        return false;
-    }
-    let action = input
-        .get("action")
-        .and_then(Value::as_str)
-        .unwrap_or("start")
-        .trim()
-        .to_ascii_lowercase();
-    let waited = matches!(action.as_str(), "run" | "wait")
-        || (matches!(action.as_str(), "start" | "spawn" | "")
-            && input.get("wait").and_then(Value::as_bool) == Some(true));
-    let metadata = output.metadata.as_ref();
-    let terminal = metadata
-        .and_then(|metadata| metadata.get("terminal"))
-        .and_then(Value::as_bool)
-        == Some(true);
-    let dispatched_children = metadata
-        .and_then(|metadata| metadata.get("child_count"))
-        .and_then(Value::as_u64)
-        .is_some_and(|count| count > 0);
-    waited && terminal && dispatched_children
 }
 
 #[cfg(test)]
@@ -3147,63 +3065,21 @@ mod operate_contract_tests {
     use super::*;
 
     #[test]
-    fn non_local_operate_allows_discovery_but_blocks_direct_execution() {
+    fn operate_allows_answers_discovery_and_control_plane_tools() {
         assert!(operate_tool_blocker("read_file", &json!({}), true).is_none());
         assert!(operate_tool_blocker(REQUEST_USER_INPUT_NAME, &json!({}), false).is_none());
+        assert!(operate_tool_blocker("update_plan", &json!({}), false).is_none());
+        assert!(operate_tool_blocker("agent", &json!({}), false).is_none());
+        assert!(operate_tool_blocker("agents/message", &json!({}), false).is_none());
+        assert!(operate_tool_blocker("workflow", &json!({"action": "start"}), false).is_none());
+        assert!(operate_tool_blocker("workflow", &json!({"action": "run"}), false).is_none());
+    }
+
+    #[test]
+    fn operate_blocks_mutating_parent_execution() {
         assert!(operate_tool_blocker("write_file", &json!({}), false).is_some());
         assert!(operate_tool_blocker("exec_shell", &json!({}), false).is_some());
-        assert!(operate_tool_blocker("agent", &json!({}), false).is_some());
-    }
-
-    #[test]
-    fn non_local_operate_requires_workflow_to_wait_for_receipt() {
-        assert!(operate_tool_blocker("workflow", &json!({"action": "run"}), false).is_none());
-        assert!(
-            operate_tool_blocker("workflow", &json!({"action": "start", "wait": true}), false,)
-                .is_none()
-        );
-        assert!(operate_tool_blocker("workflow", &json!({"action": "start"}), false).is_some());
-    }
-
-    #[test]
-    fn only_waited_terminal_workflow_result_is_an_operate_receipt() {
-        let terminal = ToolResult::success("done")
-            .with_metadata(json!({"terminal": true, "child_count": 1, "run_id": "w"}));
-        let running = ToolResult::success("running")
-            .with_metadata(json!({"terminal": false, "child_count": 1}));
-        let empty =
-            ToolResult::success("done").with_metadata(json!({"terminal": true, "child_count": 0}));
-
-        assert!(operate_workflow_terminal_receipt(
-            "workflow",
-            &json!({"action": "run"}),
-            &terminal,
-        ));
-        assert!(operate_workflow_terminal_receipt(
-            "workflow",
-            &json!({"action": "start", "wait": true}),
-            &terminal,
-        ));
-        assert!(!operate_workflow_terminal_receipt(
-            "workflow",
-            &json!({"action": "start"}),
-            &terminal,
-        ));
-        assert!(!operate_workflow_terminal_receipt(
-            "workflow",
-            &json!({"action": "run"}),
-            &running,
-        ));
-        assert!(!operate_workflow_terminal_receipt(
-            "workflow",
-            &json!({"action": "run"}),
-            &empty,
-        ));
-        assert!(!operate_workflow_terminal_receipt(
-            "write_file",
-            &json!({}),
-            &terminal,
-        ));
+        assert!(operate_tool_blocker("mcp/write_customer", &json!({}), false).is_some());
     }
 }
 

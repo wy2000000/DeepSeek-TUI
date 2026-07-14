@@ -41,10 +41,6 @@ pub struct TurnContext {
     #[allow(dead_code)]
     pub cancelled: bool,
 
-    /// Whether Operate must produce a host-verified Workflow receipt before
-    /// the turn may complete. This is resolved once at admission time.
-    pub operate_requires_workflow: bool,
-
     /// Usage for this turn
     pub usage: Usage,
 }
@@ -59,7 +55,6 @@ impl TurnContext {
             max_steps,
             tool_call_count: 0,
             cancelled: false,
-            operate_requires_workflow: false,
             usage: Usage {
                 input_tokens: 0,
                 output_tokens: 0,

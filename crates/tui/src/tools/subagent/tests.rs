@@ -873,11 +873,12 @@ fn agent_description_explains_background_child_and_transcript_handle() {
     let tool = AgentTool::new(manager, stub_runtime());
     let description = tool.description();
 
-    assert!(description.contains("Start a focused child agent task"));
-    assert!(description.contains("deliberate"));
+    assert!(description.contains("Start one focused background worker"));
+    assert!(description.contains("prompt is enough"));
+    assert!(description.contains("multiple starts"));
     assert!(description.contains("agents/list"));
     assert!(description.contains("agents/wait"));
-    assert!(description.contains("Fleet roster"));
+    assert!(description.contains("Fleet profile"));
     assert!(
         estimate_tool_description_tokens_conservative(description) <= 1024,
         "agent description exceeds the conservative 1024-token budget"
@@ -5090,6 +5091,22 @@ fn stub_runtime() -> SubAgentRuntime {
         speech_output_dir: None,
         todos: crate::tools::todo::new_shared_todo_list(),
     }
+}
+
+#[test]
+fn root_operate_dispatch_delegates_file_edits_without_bypassing_required_tools() {
+    let mut runtime = stub_runtime();
+    runtime.parent_mode = crate::tui::app::AppMode::Operate;
+    assert!(!runtime.accept_edits);
+    assert!(!runtime.context.auto_approve);
+
+    apply_session_spawn_defaults(&mut runtime);
+
+    assert!(runtime.accept_edits);
+    assert!(
+        !runtime.context.auto_approve,
+        "Operate dispatch must not silently grant Required tools such as shell"
+    );
 }
 
 /// A minimal stub client. Test helpers below only ever check struct fields

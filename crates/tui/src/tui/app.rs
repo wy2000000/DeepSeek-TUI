@@ -1108,7 +1108,7 @@ impl AppMode {
             }
             AppMode::Yolo => "Act mode with Full Access (legacy compatibility setting)",
             AppMode::Plan => "Plan mode - research and design before implementing",
-            AppMode::Operate => "Operate mode - coordinate a Fleet for multi-step work",
+            AppMode::Operate => "Operate mode - send tasks while Fleet workers run in parallel",
         }
     }
 

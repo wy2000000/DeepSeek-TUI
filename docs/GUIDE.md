@@ -220,7 +220,7 @@ CodeWhale has three visible TUI modes:
 | --- | --- | --- |
 | Plan | Exploration, design, and review before changes | Read-only investigation |
 | Act | Normal multi-step coding work | Tool use with approval gates |
-| Operate | Fleet-backed orchestration | Non-local work must produce a terminal Workflow receipt |
+| Operate | Parallel background tasks from ordinary messages | Parent coordinates; Fleet workers execute |
 
 Switch modes from the TUI with the mode picker:
 

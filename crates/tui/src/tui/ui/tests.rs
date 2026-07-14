@@ -8391,6 +8391,30 @@ async fn streaming_enter_queue_pushes_visible_toast() {
 }
 
 #[tokio::test]
+async fn operate_streaming_enter_queues_another_parallel_task() {
+    let mut app = create_test_app();
+    app.mode = AppMode::Operate;
+    app.is_loading = true;
+    app.streaming_message_index = Some(0);
+    let config = Config::default();
+    let engine = crate::core::engine::mock_engine_handle();
+    let queued = build_queued_message(&mut app, "check the docs too".to_string());
+
+    submit_or_steer_message(&mut app, &config, &engine.handle, queued)
+        .await
+        .expect("Operate streaming submit queues another task");
+
+    assert_eq!(app.queued_message_count(), 1);
+    assert!(app.status_message.as_deref().is_some_and(
+        |status| status.contains("queued task(s)") && status.contains("workers continue")
+    ));
+    let toast = app.status_toasts.back().expect("Operate queue toast");
+    assert_eq!(toast.level, StatusToastLevel::Info);
+    assert!(toast.text.contains("Queued task"));
+    assert!(toast.text.contains("dispatches next"));
+}
+
+#[tokio::test]
 async fn numeric_plan_choice_still_queues_follow_up_when_busy() {
     let mut app = create_test_app();
     app.mode = AppMode::Plan;

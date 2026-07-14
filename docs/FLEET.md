@@ -88,10 +88,11 @@ drafting behind a ratify gate:
 ## Naming: Modes, Workflow, and Fleet
 
 These names describe different layers, not competing systems. Plan and Act are
-the everyday work modes. Operate coordinates non-local work through Workflow:
-the host permits read-only discovery, blocks direct write/shell fallthrough,
-and requires a waited terminal Workflow receipt before the turn can complete.
-Workflow is the orchestration overlay that orders the work.
+the everyday work modes. Operate accepts ordinary messages and dispatches
+non-local work to background Fleet workers: the host permits read-only
+discovery and coordination but blocks direct parent write/shell fallthrough.
+Workflow is an optional orchestration overlay for work that needs ordering,
+gates, shared budgets, replay, or deterministic fan-in.
 
 - **Workflow** is the repeatable plan and user-facing orchestration
   overlay: a script/IR that decides which phases and agents run next, keeps
@@ -105,10 +106,9 @@ Workflow is the orchestration overlay that orders the work.
   when a phase needs many workers at once, Workflow dispatches them as a
   Fleet-backed run (durable workers, receipts, goal re-dispatch) rather than
   reviving prompt-only sub-agent fanout.
-- **Fan-in is mandatory:** no fan-out without an owner that waits, aggregates,
-  verifies, and synthesizes one result. The operator should depend on one
-  manager or workflow receipt, not N loose `agent` children scattered across
-  the transcript.
+- **Fan-in is explicit:** when the user needs one combined result, an owner
+  aggregates, verifies, and synthesizes the worker receipts. Independent tasks
+  may finish separately; dispatch is never presented as completion.
 
 UI guidance: keep the main transcript calm. A Workflow run should appear as a
 compact progress card plus Work/Agents sidebar rows with phase names, worker

@@ -726,7 +726,7 @@ async fn engine_cancellation_drops_active_injected_model_request() {
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
-async fn operate_admission_blocks_unready_nontrivial_but_allows_act_and_trivial() {
+async fn operate_conversation_reaches_provider_when_workers_are_disabled() {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -734,9 +734,9 @@ async fn operate_admission_blocks_unready_nontrivial_but_allows_act_and_trivial(
     let workspace = tempdir().expect("tempdir");
     let server = MockServer::start().await;
     let done_sse = concat!(
-        "data: {\"id\":\"chatcmpl-act\",\"choices\":[{\"index\":0,",
-        "\"delta\":{\"content\":\"local Act response\"},\"finish_reason\":null}]}\n\n",
-        "data: {\"id\":\"chatcmpl-act\",\"choices\":[{\"index\":0,",
+        "data: {\"id\":\"chatcmpl-operate\",\"choices\":[{\"index\":0,",
+        "\"delta\":{\"content\":\"I can still answer normally.\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-operate\",\"choices\":[{\"index\":0,",
         "\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
         "data: [DONE]\n\n",
     );
@@ -747,7 +747,7 @@ async fn operate_admission_blocks_unready_nontrivial_but_allows_act_and_trivial(
                 .insert_header("content-type", "text/event-stream")
                 .set_body_string(done_sse),
         )
-        .expect(2)
+        .expect(1)
         .mount(&server)
         .await;
 
@@ -762,22 +762,22 @@ async fn operate_admission_blocks_unready_nontrivial_but_allows_act_and_trivial(
         subagents_enabled: false,
         ..EngineConfig::default()
     };
-    let ask = "audit every crate, implement the fixes, then verify independently";
-
-    let (operate_engine, operate_handle) = Engine::new(engine_config.clone(), &api_config);
+    let (operate_engine, operate_handle) = Engine::new(engine_config, &api_config);
     let operate_task = tokio::spawn(operate_engine.run());
     operate_handle
-        .send(external_user_message_op(ask, AppMode::Operate))
+        .send(external_user_message_op(
+            "what is a Rust worktree?",
+            AppMode::Operate,
+        ))
         .await
         .expect("send Operate turn");
 
-    let mut saw_blocker = false;
     let mut saw_operate_complete = false;
     let mut saw_operate_route = false;
     let mut operate_rx = operate_handle.rx_event.write().await;
     while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), operate_rx.recv())
         .await
-        .expect("timed out waiting for Operate blocker")
+        .expect("timed out waiting for Operate completion")
     {
         match event {
             Event::TurnStarted { route, .. } => {
@@ -788,28 +788,10 @@ async fn operate_admission_blocks_unready_nontrivial_but_allows_act_and_trivial(
                 saw_operate_route = true;
             }
             Event::Error { envelope, .. } => {
-                saw_blocker = true;
-                assert!(
-                    envelope.recoverable,
-                    "readiness blocker must not force offline mode"
-                );
-                assert!(envelope.message.contains("Operate readiness blocked"));
-                assert!(envelope.message.contains("/setup fleet"));
-                assert!(envelope.message.contains("No provider request"));
-                assert!(
-                    envelope
-                        .message
-                        .contains("sub-agent/Workflow runtime is disabled")
-                );
-                assert!(!envelope.message.contains("start an explicit `/workflow`"));
+                panic!("ordinary Operate conversation emitted an error: {envelope:?}");
             }
             Event::TurnComplete { status, error, .. } => {
-                assert_eq!(status, TurnOutcomeStatus::Failed);
-                assert!(
-                    error
-                        .as_deref()
-                        .is_some_and(|message| message.contains("/setup fleet"))
-                );
+                assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
                 saw_operate_complete = true;
                 break;
             }
@@ -819,111 +801,23 @@ async fn operate_admission_blocks_unready_nontrivial_but_allows_act_and_trivial(
     drop(operate_rx);
 
     assert!(
-        saw_blocker,
-        "Operate must surface an actionable readiness blocker"
-    );
-    assert!(
         saw_operate_route,
         "model turns must publish route provenance"
     );
     assert!(
         saw_operate_complete,
-        "blocked Operate turn must terminate cleanly"
+        "Operate conversation must complete without worker readiness"
     );
-    assert!(
-        server
-            .received_requests()
-            .await
-            .expect("recorded requests after Operate")
-            .is_empty(),
-        "blocked Operate must make zero provider requests"
-    );
+    let requests = server
+        .received_requests()
+        .await
+        .expect("recorded requests after Operate");
+    assert_eq!(requests.len(), 1, "Operate must reach the provider");
     operate_handle
         .send(Op::Shutdown)
         .await
         .expect("shutdown Operate engine");
     operate_task.await.expect("Operate engine task");
-
-    let (act_engine, act_handle) = Engine::new(engine_config.clone(), &api_config);
-    let act_task = tokio::spawn(act_engine.run());
-    act_handle
-        .send(external_user_message_op(ask, AppMode::Agent))
-        .await
-        .expect("send Act turn");
-
-    let mut saw_act_complete = false;
-    let mut act_rx = act_handle.rx_event.write().await;
-    while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), act_rx.recv())
-        .await
-        .expect("timed out waiting for Act completion")
-    {
-        if let Event::TurnComplete { status, error, .. } = event {
-            assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
-            saw_act_complete = true;
-            break;
-        }
-    }
-    drop(act_rx);
-
-    assert!(
-        saw_act_complete,
-        "Act turn must reach provider-backed completion"
-    );
-
-    let requests = server
-        .received_requests()
-        .await
-        .expect("recorded requests after Act");
-    assert_eq!(
-        requests.len(),
-        1,
-        "Act must retain its ordinary local model path"
-    );
-    act_handle
-        .send(Op::Shutdown)
-        .await
-        .expect("shutdown Act engine");
-    act_task.await.expect("Act engine task");
-
-    let (trivial_engine, trivial_handle) = Engine::new(engine_config, &api_config);
-    let trivial_task = tokio::spawn(trivial_engine.run());
-    trivial_handle
-        .send(external_user_message_op("git status", AppMode::Operate))
-        .await
-        .expect("send trivial Operate turn");
-
-    let mut saw_trivial_complete = false;
-    let mut trivial_rx = trivial_handle.rx_event.write().await;
-    while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), trivial_rx.recv())
-        .await
-        .expect("timed out waiting for trivial Operate completion")
-    {
-        if let Event::TurnComplete { status, error, .. } = event {
-            assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
-            saw_trivial_complete = true;
-            break;
-        }
-    }
-    drop(trivial_rx);
-
-    assert!(
-        saw_trivial_complete,
-        "provably one-step Operate turn must retain the local path"
-    );
-    let requests = server
-        .received_requests()
-        .await
-        .expect("recorded requests after trivial Operate");
-    assert_eq!(
-        requests.len(),
-        2,
-        "trivial Operate must make the second allowed provider request"
-    );
-    trivial_handle
-        .send(Op::Shutdown)
-        .await
-        .expect("shutdown trivial Operate engine");
-    trivial_task.await.expect("trivial Operate engine task");
 }
 
 #[test]

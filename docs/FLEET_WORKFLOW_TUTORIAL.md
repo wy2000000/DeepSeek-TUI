@@ -8,16 +8,18 @@ of the problem:
 - **Workflow** describes orchestration: phases, branches, reducers, loops, and
   agent leaves that can dispatch through the Fleet/sub-agent runtime.
 
-**Default product path:** ask in natural language. Soft-auto Workflow decides
-when orchestration helps, **tells you the shape**, may open
-`request_user_input` for 1–2 setup choices, then launches — you do not need to
-write workflow files for ordinary multi-agent work. Details:
+**Default product path:** ask in natural language. Operate dispatches ordinary
+work to one or more background Fleet workers and keeps the composer available
+for more messages. It chooses Workflow only when ordered phases, gates, shared
+budgets, or deterministic fan-in add real value; you do not need to write
+workflow files for ordinary multi-agent work. Details:
 [Automatic Workflows](AUTOMATIC_WORKFLOWS.md).
 
 This tutorial covers the **manual** Fleet task-spec / checked-in Workflow path
 for operators who want durable host workers and reviewable specs. A
-one-sentence request should still not silently generate `tasks.json` and start
-workers without indication or approval.
+one-sentence request should still not silently generate `tasks.json`; worker
+cards and approval posture make dispatch visible without exposing authoring
+mechanics.
 
 ## 1. Prepare The Workspace
 

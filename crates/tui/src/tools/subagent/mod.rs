@@ -4480,11 +4480,10 @@ impl ToolSpec for AgentTool {
 
     fn description(&self) -> &'static str {
         concat!(
-            "Start a focused child agent task. Prefer deliberate delegation: declare type (or profile), ",
-            "workspace_policy, expected_artifact, and write_authority (deliberate=true makes them required). ",
-            "For coordination after spawn, use agents/list, agents/message, agents/followup, agents/interrupt, and agents/wait — ",
-            "do not poll. Pass profile to spawn a saved Fleet roster member. ",
-            "Legacy action=status|peek|wait|cancel remain for compatibility; prefer the narrow agents/* tools."
+            "Start one focused background worker and return immediately with its agent_id; a prompt is enough. ",
+            "Use multiple starts for independent parallel tasks. Add a Fleet profile, role, worktree, or explicit limits only when they improve the task. ",
+            "Coordinate later with agents/list, agents/message, agents/followup, agents/interrupt, or agents/wait instead of polling. ",
+            "Legacy action=status|peek|wait|cancel remain for compatibility."
         )
     }
 
@@ -4495,7 +4494,7 @@ impl ToolSpec for AgentTool {
                 "action": {
                     "type": "string",
                     "enum": ["start", "status", "peek", "wait", "cancel"],
-                    "description": "start (default) launches a child. status lists current children or inspects agent_id. peek is status for one child. wait blocks until a running child settles (agent_id for one specific child, otherwise the next completion) — use this instead of polling peek/status or sleeping. cancel stops a running child by agent_id."
+                    "description": "start (default) launches a background worker and returns immediately. status lists current children or inspects agent_id. peek is status for one child. wait blocks until a running child settles (agent_id for one specific child, otherwise the next completion). cancel stops a running child by agent_id."
                 },
                 "agent_id": {
                     "type": "string",
@@ -4517,7 +4516,7 @@ impl ToolSpec for AgentTool {
                 },
                 "prompt": {
                     "type": "string",
-                    "description": "Focused task for the child agent. Prefer a compact Subagent Brief with QUESTION, SCOPE, ALREADY_KNOWN, EFFORT, STOP_CONDITION, and OUTPUT."
+                    "description": "The focused task to give the background worker. This is the only field needed for an ordinary start."
                 },
                 "type": {
                     "type": "string",
@@ -4676,7 +4675,7 @@ impl ToolSpec for AgentTool {
                 return cancel_agent_from_input(&input, self.manager.clone(), context).await;
             }
         }
-        let (snapshot, spawn_policy_note, _) =
+        let (snapshot, _) =
             spawn_subagent_from_input(input, self.manager.clone(), self.runtime.clone()).await?;
         let worker_record = {
             let manager = self.manager.read().await;
@@ -4685,15 +4684,14 @@ impl ToolSpec for AgentTool {
         let projection = subagent_session_projection(snapshot, false, context, worker_record).await;
         let mut tool_result = ToolResult::json(&projection)
             .map_err(|e| ToolError::execution_failed(e.to_string()))?;
-        let mut metadata = json!({
+        let metadata = json!({
+            "action": "start",
+            "agent_id": projection.agent_id,
             "status": projection.status,
             "terminal": projection.terminal,
             "context_mode": projection.context_mode,
             "prefix_cache": projection.prefix_cache,
         });
-        if let Some(note) = spawn_policy_note {
-            metadata["spawn_policy"] = json!(note);
-        }
         tool_result.metadata = Some(metadata);
         Ok(tool_result)
     }
@@ -5077,10 +5075,10 @@ fn child_client_for_member(
 async fn spawn_subagent_from_input(
     input: Value,
     manager: SharedSubAgentManager,
-    runtime: SubAgentRuntime,
-) -> Result<(SubAgentResult, Option<String>, WorkflowTaskSpawnMetadata), ToolError> {
+    mut runtime: SubAgentRuntime,
+) -> Result<(SubAgentResult, WorkflowTaskSpawnMetadata), ToolError> {
+    apply_session_spawn_defaults(&mut runtime);
     let mut spawn_request = parse_spawn_request(&input)?;
-    let spawn_policy_note = apply_session_spawn_policy(&runtime, &mut spawn_request);
     let profile_member = apply_spawn_profile(&mut spawn_request, &runtime.fleet_roster)?;
 
     if runtime.would_exceed_depth() {
@@ -5277,28 +5275,16 @@ async fn spawn_subagent_from_input(
         }
     }
 
-    Ok((result, spawn_policy_note, spawn_metadata))
+    Ok((result, spawn_metadata))
 }
 
-/// Mode-aware spawn defaults for the root orchestrator (Wave 7 M4/M5).
-fn apply_session_spawn_policy(
-    runtime: &SubAgentRuntime,
-    request: &mut SpawnRequest,
-) -> Option<String> {
-    if runtime.spawn_depth > 0 {
-        return None;
-    }
-    match runtime.parent_mode {
-        AppMode::Operate => {
-            if request.profile.is_some() || request.agent_type_explicit {
-                return None;
-            }
-            Some(
-                "Operate spawn policy: pass profile=scout|builder|reviewer|verifier or use workflow for multi-step work; the operator orchestrates, workers execute."
-                    .to_string(),
-            )
-        }
-        _ => None,
+/// A root Operate dispatch has already crossed the approval boundary on the
+/// `agent` call. Delegate Suggest-level file edits to its write-capable worker
+/// posture so a normal message can produce work; Required tools such as shell
+/// still follow the active permission posture.
+fn apply_session_spawn_defaults(runtime: &mut SubAgentRuntime) {
+    if runtime.spawn_depth == 0 && runtime.parent_mode == AppMode::Operate {
+        runtime.accept_edits = true;
     }
 }
 
@@ -5363,7 +5349,7 @@ pub(crate) async fn spawn_workflow_task(
     // Suggest-level file edits for write-capable roles. Shell / network / MCP
     // still require parent auto-approve (or fail closed).
     runtime.accept_edits = true;
-    let (result, _, mut metadata) = spawn_subagent_from_input(input, manager, runtime).await?;
+    let (result, mut metadata) = spawn_subagent_from_input(input, manager, runtime).await?;
     // Prefer the identity values the driver stamped; fall back to task options.
     let workflow_task_label = identity
         .workflow_task_label

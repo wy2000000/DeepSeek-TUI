@@ -30,7 +30,7 @@ Run `/mode` to open the mode picker, or switch directly with `/mode act`,
 
 - **Plan**: design-first prompting. Read-only investigation tools stay available; shell and patch execution stay off. Use this when you want to think out loud and produce a plan to hand to a human (yourself later, or a reviewer).
 - **Act** (Agent): multi-step tool use. In interactive TUI sessions, shell tools (`exec_shell`, `task_shell_start`, `task_shell_wait`) are available by default and approval prompts gate each call. Set top-level `allow_shell = false` to hide shell tools for a workspace/profile. File writes are allowed without a prompt.
-- **Operate**: conductor posture for coordinated work. Non-local requests may inspect with read-only tools, but writes and shell execution must run through a waited Workflow; the host refuses direct Act-style fallthrough and will not complete the turn without a terminal Workflow receipt. Explicit one-step local requests remain local when delegation would only add overhead.
+- **Operate**: multitask conductor posture. Send ordinary messages; simple answers and read-only inspection stay in the foreground, while executable work is dispatched to background Fleet workers. New messages can start additional lanes while workers continue. Workflow is optional and reserved for work that needs ordered phases, gates, shared budgets, or deterministic fan-in.
 
 **Act** is accepted as an alias for Agent mode. Saved settings still normalize to `agent` for backward compatibility.
 
@@ -39,10 +39,10 @@ Run `/mode` to open the mode picker, or switch directly with `/mode act`,
 | Tool family | Plan | Act | Operate |
 |:---|:---:|:---:|:---:|
 | Read-only file, search, and diagnostic tools | yes | yes | yes |
-| File write and patch tools | no | yes | Workflow workers for non-local requests; direct only for an explicitly local one-step request |
-| Shell tools (`exec_shell`, `task_shell_start`, waits, interact, cancel) | no | approval-gated by default, hidden when `allow_shell = false` | Workflow workers for non-local requests; otherwise follows the active shell policy |
+| File write and patch tools | no | yes | Fleet workers; blocked in the parent |
+| Shell tools (`exec_shell`, `task_shell_start`, waits, interact, cancel) | no | approval-gated by default, hidden when `allow_shell = false` | Fleet workers; blocked in the parent |
 | Paid or external-service tools | follows approval posture | follows approval posture | follows approval posture |
-| Access outside the workspace root | no | only with trust mode | only with trust mode and the active Workflow/worker policy |
+| Access outside the workspace root | no | only with trust mode | only through an authorized worker runtime |
 
 If a shell tool is missing from the model-visible catalog in Agent mode, check
 for an explicit `allow_shell = false` in the active config/profile or runtime
