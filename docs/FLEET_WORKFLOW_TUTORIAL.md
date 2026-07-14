@@ -48,6 +48,10 @@ across repositories, while a same-id project profile remains the higher-priority
 override. Fleet task specs can reference either resolved profile with
 `worker.agent_profile` or the shorter `worker.profile` alias.
 
+This makes the Fleet definition cross-repository, not the authority of one
+running session. For a multi-repository operation, launch Codewhale from a
+shared parent workspace; workers remain inside that workspace boundary.
+
 ## 2. Write A Fleet Task Spec
 
 `codewhale fleet run` accepts JSON or TOML. The checked-in

@@ -1012,10 +1012,10 @@ impl FleetSetupView {
             "Scope",
             match self.profile_scope {
                 FleetProfileScope::Project => format!(
-                    "Project — shared with this repository at {PROFILE_DIR}. Press s for a personal profile available across repositories."
+                    "Project — shared with this repository at {PROFILE_DIR}. Press s for a personal profile reusable across repositories. Profile scope does not expand the current workspace."
                 ),
                 FleetProfileScope::Personal => format!(
-                    "Personal — available across repositories at {}. Project profiles still override it by id. Press s for project scope.",
+                    "Personal — reusable across repositories at {}. Project profiles still override it by id. The current operation stays inside its workspace. Press s for project scope.",
                     self.profile_scope.display_dir()
                 ),
             },
@@ -2030,6 +2030,10 @@ mod tests {
         for section in ["Role", "Model", "Auth & readiness", "Permissions", "Tools"] {
             assert!(top.contains(section), "review missing section: {section}");
         }
+        assert!(
+            top.contains("does not expand the current workspace"),
+            "profile scope must not imply cross-workspace execution: {top}"
+        );
 
         // The review is intentionally scrollable; scrolling to the bottom reveals
         // the workspace/org scope, review policy, and the honest save note.

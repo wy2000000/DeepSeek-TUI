@@ -42,7 +42,7 @@ Run `/mode` to open the mode picker, or switch directly with `/mode act`,
 | File write and patch tools | no | yes | Fleet workers; blocked in the parent |
 | Shell tools (`exec_shell`, `task_shell_start`, waits, interact, cancel) | no | approval-gated by default, hidden when `allow_shell = false` | Fleet workers; blocked in the parent |
 | Paid or external-service tools | follows approval posture | follows approval posture | follows approval posture |
-| Access outside the workspace root | no | only with trust mode | only through an authorized worker runtime |
+| Access outside the workspace root | no | only with trust mode | no; start at a shared parent workspace for multi-repository work |
 
 If a shell tool is missing from the model-visible catalog in Agent mode, check
 for an explicit `allow_shell = false` in the active config/profile or runtime

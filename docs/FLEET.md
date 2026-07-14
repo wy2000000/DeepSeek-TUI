@@ -61,8 +61,12 @@ choose where the profile lives:
   every repository on this machine. A project profile with the same id still
   overrides the personal profile for that project.
 
-Picking a
-concrete model pins its provider explicitly: the saved profile records both
+Profile scope controls where a role definition is reusable; it does not widen
+the filesystem boundary of a running operation. To coordinate several nearby
+repositories, start Codewhale from their shared parent directory so that parent
+is the workspace. Workers still inherit the active trust and permission posture.
+
+Picking a concrete model pins its provider explicitly: the saved profile records both
 `model` and `provider` fields, so the route it names doesn't depend on
 whichever provider happens to be active when the profile is later loaded.
 Pressing **Enter** ("start") on the review step previews the exact starter
