@@ -42,7 +42,7 @@ If you want named reusable workers, open the TUI and run:
 
 Pick a role, choose whether that profile inherits the operator route or pins a
 specific provider/model/thinking tier, review the permissions/tools/route
-posture, and ratify the rendered TOML. Project profiles are saved under
+posture, and save the rendered TOML. Project profiles are saved under
 `.codewhale/agents/<role>.toml`. On Review, press `s` before previewing to save
 a personal profile under `$CODEWHALE_HOME/agents/<role>.toml`; it is available
 across repositories, while a same-id project profile remains the higher-priority
@@ -139,7 +139,7 @@ Common task fields:
 | `id`, `name` | Stable task identity and display name. |
 | `objective`, `instructions` | The worker goal and exact operating instructions. |
 | `worker.role` | Built-in or custom role intent, such as `reviewer`, `builder`, `read-only`, or `smoke-runner`. |
-| `worker.profile` / `worker.agent_profile` | Ratified Fleet roster profile resolved from project `.codewhale/agents/`, personal `$CODEWHALE_HOME/agents/`, or `[fleet.profiles]`. |
+| `worker.profile` / `worker.agent_profile` | Saved Fleet roster profile resolved from project `.codewhale/agents/`, personal `$CODEWHALE_HOME/agents/`, or `[fleet.profiles]`. |
 | `worker.tools` | Tool names the task expects the worker to use. |
 | `worker.model` | Preferred explicit model pin. Route resolution still owns provider/model validation. |
 | `worker.model_class`, `worker.loadout` | Compatibility routing hints for older task specs; prefer `worker.profile` plus saved profile route pins for new specs. |

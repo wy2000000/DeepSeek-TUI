@@ -6424,10 +6424,10 @@ fn deliver_fleet_draft_result(
                 if installed {
                     app.status_message = Some(match locale {
                         crate::localization::Locale::ZhHans => {
-                            format!("{model_label} 已起草配置。请查看下方 TOML，然后按 g 批准。")
+                            format!("{model_label} 已起草配置。请查看下方 TOML，然后按 g 保存。")
                         }
                         _ => format!(
-                            "{model_label} drafted the profile. Review the TOML below, then press g to ratify."
+                            "{model_label} drafted the profile. Review the TOML below, then press g to save."
                         ),
                     });
                 }
@@ -11511,10 +11511,10 @@ async fn handle_view_events(
                         let zh = app.ui_locale == crate::localization::Locale::ZhHans;
                         app.add_message(HistoryCell::System {
                             content: if zh {
-                                format!("已批准并保存 Fleet 配置：{}", target.display())
+                                format!("已保存 Fleet 配置：{}", target.display())
                             } else {
                                 format!(
-                                    "Fleet {} profile ratified and saved: {}",
+                                    "Fleet {} profile saved: {}",
                                     scope.label(),
                                     target.display()
                                 )

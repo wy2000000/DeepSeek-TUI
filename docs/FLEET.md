@@ -72,23 +72,23 @@ Picking a concrete model pins its provider explicitly: the saved profile records
 `model` and `provider` fields, so the route it names doesn't depend on
 whichever provider happens to be active when the profile is later loaded.
 Pressing **Enter** ("start") on the review step previews the exact starter
-profile TOML inline on that same screen; nothing is written until you ratify it.
+profile TOML inline on that same screen; nothing is written until you save it.
 The `provider` field may be a built-in provider id such as `openrouter` or a
 user-named OpenAI-compatible provider configured under `[providers.<name>]`
 such as `lm-studio`; the launch path preserves that id and fails closed if the
 provider is not configured.
 
 When a provider is configured, the review step also offers model-assisted
-drafting behind a ratify gate:
+drafting behind an explicit preview-before-save gate:
 
 - Press **`m`** to have your first configured model draft the profile. The
   draft arrives sanitized and bounded — permissions stay at the **fleet floor**
   (no shell, no trust, approval required) regardless of what the model
   proposes.
-- **Drafting is not ratifying.** The exact rendered TOML preview renders
+- **Drafting is not saving.** The exact rendered TOML preview renders
   inline on the review step (not in a separate scrollable viewer), so nothing
-  is saved until you press **`g`** or **Enter** to ratify (or press `m` again
-  to redraft). Ratifying writes the profile to the project or personal scope
+  is saved until you press **`g`** or **Enter** to save (or press `m` again
+  to redraft). Saving writes the profile to the project or personal scope
   shown in the preview.
 
 ## Naming: Modes, Workflow, and Fleet
