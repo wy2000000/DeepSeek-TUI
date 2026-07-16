@@ -3170,9 +3170,9 @@ fn build_tui_command_with_paths(
         cmd.env("CODEWHALE_PROVIDER", &provider);
         cmd.env("DEEPSEEK_PROVIDER", provider);
     }
-    if !uses_raw_tui_provider
-        && !(cli.profile.is_some()
-            && matches!(resolved_runtime.provider_source, ProviderSource::Config))
+    if !(uses_raw_tui_provider
+        || (cli.profile.is_some()
+            && matches!(resolved_runtime.provider_source, ProviderSource::Config)))
         && matches!(keyring_bridge_source, Some(RuntimeApiKeySource::Keyring))
         && let Some(api_key) = keyring_bridge_api_key
     {
