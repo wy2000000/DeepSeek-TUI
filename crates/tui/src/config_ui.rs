@@ -1223,7 +1223,7 @@ fn bool_str(value: bool) -> &'static str {
 mod tests {
     use super::*;
     use crate::config::{ApiProvider, Config};
-    use crate::test_support::lock_test_env;
+    use crate::test_support::{EnvVarGuard, lock_test_env};
     use crate::tui::app::{App, TuiOptions};
     use std::fs;
     use std::path::PathBuf;
@@ -1510,10 +1510,7 @@ zai = "GLM-5.2"
         )
         .expect("seed settings");
 
-        let old_config_path = std::env::var_os("DEEPSEEK_CONFIG_PATH");
-        unsafe {
-            std::env::set_var("DEEPSEEK_CONFIG_PATH", &config_path);
-        }
+        let _config_path_guard = EnvVarGuard::set("DEEPSEEK_CONFIG_PATH", &config_path);
 
         let mut config = Config::load(Some(config_path.clone()), None).expect("load config");
         let mut app = app();
@@ -1556,14 +1553,6 @@ zai = "GLM-5.2"
             persisted["default_text_model"].as_str(),
             Some("deepseek-v4-pro")
         );
-
-        unsafe {
-            if let Some(value) = old_config_path {
-                std::env::set_var("DEEPSEEK_CONFIG_PATH", value);
-            } else {
-                std::env::remove_var("DEEPSEEK_CONFIG_PATH");
-            }
-        }
     }
 
     #[test]

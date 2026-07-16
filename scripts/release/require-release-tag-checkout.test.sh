@@ -12,7 +12,7 @@ git init --bare --quiet "${remote}"
 # of that checkout remains shallow, so this disposable remote must accept the
 # fixture's tag without requiring history that the test never inspects.
 git -C "${remote}" config receive.shallowUpdate true
-git clone --quiet --no-hardlinks "${repo_root}" "${checkout}"
+git clone --quiet --no-hardlinks --no-tags "${repo_root}" "${checkout}"
 git -C "${checkout}" remote set-url origin "${remote}"
 git -C "${checkout}" config user.name "Release Test"
 git -C "${checkout}" config user.email "release-test@example.invalid"
