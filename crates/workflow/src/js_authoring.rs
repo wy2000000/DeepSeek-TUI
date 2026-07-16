@@ -668,6 +668,16 @@ workflow({
                 "{expected_role} must constrain source reads"
             );
             assert_eq!(leaf.budget.max_steps, Some(max_steps), "{expected_role}");
+            let response_budget = match max_steps {
+                4 => "at most four model responses",
+                3 => "at most three model responses",
+                2 => "at most two model responses",
+                _ => unreachable!("unexpected stopship model-response budget"),
+            };
+            assert!(
+                leaf.prompt.contains(response_budget) && leaf.prompt.contains("with no tool calls"),
+                "{expected_role} must reserve a response for its explicit verdict"
+            );
             assert_eq!(
                 leaf.budget.timeout_secs,
                 Some(timeout_secs),
