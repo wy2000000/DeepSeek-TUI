@@ -510,6 +510,7 @@ impl PluginManifest {
                             ));
                         }
                     }
+                    validate_mcp_argv_has_no_literal_credentials(name, &server.args)?;
                     for (index, arg) in server.args.iter().enumerate() {
                         if Path::new(arg).is_absolute() || looks_windows_absolute(arg) {
                             return Err(format!(
@@ -539,6 +540,14 @@ impl PluginManifest {
                     }
                 }
                 (None, Some(url)) => {
+                    if !server.scopes.is_empty()
+                        || server.oauth.is_some()
+                        || server.oauth_resource.is_some()
+                    {
+                        return Err(format!(
+                            "remote MCP server `{name}` may not declare OAuth fields because plugin OAuth is disabled in v0.9.1; use env_headers or bearer_token_env_var"
+                        ));
+                    }
                     let parsed = reqwest::Url::parse(url)
                         .map_err(|e| format!("MCP server `{name}` URL is invalid: {e}"))?;
                     if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
@@ -789,6 +798,67 @@ fn validate_optional_text(
         validate_text(field, value, max_chars)?;
     }
     Ok(())
+}
+
+fn validate_mcp_argv_has_no_literal_credentials(
+    server_name: &str,
+    arguments: &[String],
+) -> Result<(), String> {
+    for (index, argument) in arguments.iter().enumerate() {
+        let (key, assigned_value) = argument
+            .split_once('=')
+            .map_or((argument.as_str(), None), |(key, value)| (key, Some(value)));
+        if credential_argument_key(key)
+            && (assigned_value.is_some_and(|value| !value.is_empty())
+                || (assigned_value.is_none() && arguments.get(index + 1).is_some()))
+        {
+            return Err(format!(
+                "MCP server `{server_name}` argument #{} embeds a credential-bearing value; pass credentials through a reviewed environment mapping instead",
+                index + 1
+            ));
+        }
+        if looks_like_literal_credential(argument) {
+            return Err(format!(
+                "MCP server `{server_name}` argument #{} looks like a literal credential; pass credentials through a reviewed environment mapping instead",
+                index + 1
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn credential_argument_key(value: &str) -> bool {
+    let key = value
+        .trim_start_matches('-')
+        .replace('_', "-")
+        .to_ascii_lowercase();
+    [
+        "token",
+        "api-key",
+        "apikey",
+        "password",
+        "passwd",
+        "secret",
+        "client-secret",
+        "authorization",
+        "auth-token",
+        "access-key",
+        "private-key",
+        "credential",
+        "credentials",
+    ]
+    .iter()
+    .any(|sensitive| key == *sensitive || key.ends_with(&format!("-{sensitive}")))
+}
+
+fn looks_like_literal_credential(value: &str) -> bool {
+    let trimmed = value.trim();
+    trimmed.starts_with("sk-")
+        || trimmed.starts_with("ghp_")
+        || trimmed.starts_with("github_pat_")
+        || trimmed.starts_with("xoxb-")
+        || trimmed.starts_with("xoxp-")
+        || (trimmed.starts_with("AKIA") && trimmed.len() >= 16)
 }
 
 fn validate_text(field: &str, value: &str, max_chars: usize) -> Result<(), String> {
@@ -1460,14 +1530,9 @@ required = true
 enabled_tools = ["read"]
 disabled_tools = ["write"]
 bearer_token_env_var = "PLUGIN_BEARER"
-scopes = ["tools.read"]
-oauth_resource = "https://resource.invalid/mcp"
 
 [mcp_servers.remote.env_headers]
 X_Api_Key = "PLUGIN_API_KEY"
-
-[mcp_servers.remote.oauth]
-client_id = "public-client-id"
 
 [capabilities]
 network_hosts = ["example.invalid"]
@@ -1479,6 +1544,58 @@ network_hosts = ["example.invalid"]
             vec!["example.invalid".to_string()]
         );
         assert_eq!(validated.inventory.remote_mcp_servers, 1);
+    }
+
+    #[test]
+    fn plugin_mcp_oauth_fields_are_rejected_for_v091() {
+        for oauth_fields in [
+            "scopes = [\"tools.read\"]\n",
+            "oauth_resource = \"https://resource.invalid/mcp\"\n",
+            "[mcp_servers.remote.oauth]\nclient_id = \"public-client-id\"\n",
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = write_manifest(
+                tmp.path(),
+                &format!(
+                    "\n[mcp_servers.remote]\nurl = \"https://example.invalid/mcp\"\n{oauth_fields}[capabilities]\nnetwork_hosts = [\"example.invalid\"]\n"
+                ),
+            );
+            let error = PluginManifest::validate_from_path(&path)
+                .expect_err("plugin OAuth authority must remain disabled in v0.9.1");
+            assert!(error.contains("plugin OAuth is disabled in v0.9.1"));
+        }
+    }
+
+    #[test]
+    fn reviewed_stdio_argv_rejects_literal_credentials_but_accepts_exact_safe_values() {
+        for args in [
+            r#"["server.js", "--token", "literal-secret"]"#,
+            r#"["server.js", "--api-key=literal-secret"]"#,
+            r#"["server.js", "sk-live-literal"]"#,
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            fs::write(tmp.path().join("server.js"), "// entrypoint\n").unwrap();
+            let path = write_manifest(
+                tmp.path(),
+                &format!("\n[mcp_servers.local]\ncommand = \"node\"\nargs = {args}\n"),
+            );
+            let error = PluginManifest::validate_from_path(&path)
+                .expect_err("credential-bearing argv must fail closed");
+            assert!(error.contains("credential"), "{error}");
+        }
+
+        let safe = tempfile::tempdir().unwrap();
+        fs::write(safe.path().join("server.js"), "// entrypoint\n").unwrap();
+        let path = write_manifest(
+            safe.path(),
+            r#"
+[mcp_servers.local]
+command = "node"
+args = ["server.js", "--mode=worker", "-e", "console.log('ready')"]
+"#,
+        );
+        PluginManifest::validate_from_path(&path)
+            .expect("safe interpreter argv should remain reviewable exactly");
     }
 
     #[test]

@@ -1016,7 +1016,7 @@ impl Engine {
             .as_ref()
             .filter(|registry| registry.workspace() == config.workspace)
             .cloned()
-            .unwrap_or_else(|| crate::plugins::registry_for_workspace(&config.workspace));
+            .unwrap_or_else(|| Arc::new(crate::plugins::PluginRegistry::empty(&config.workspace)));
 
         // Create clients for both providers
         let (deepseek_client, deepseek_client_error) = match DeepSeekClient::new(api_config) {
@@ -1978,7 +1978,7 @@ impl Engine {
                         self.config.workspace = workspace.clone();
                         if plugin_workspace_changed {
                             self.plugin_registry =
-                                crate::plugins::registry_for_workspace(&workspace);
+                                self.plugin_registry.rediscover_for_workspace(&workspace);
                             self.config.plugin_registry = Some(Arc::clone(&self.plugin_registry));
                             // A pool may contain plugin servers and authority
                             // receipts from the previous workspace snapshot.

@@ -177,7 +177,7 @@ fn test_mcp_config_parse() {
 }
 
 #[test]
-fn mcp_pool_parse_prefixed_name_preserves_registered_underscored_server() {
+fn mcp_pool_parse_prefixed_name_rejects_ambiguous_configured_server_prefixes() {
     let config: McpConfig = serde_json::from_str(
         r#"{
             "servers": {
@@ -189,12 +189,10 @@ fn mcp_pool_parse_prefixed_name_preserves_registered_underscored_server() {
     .unwrap();
     let pool = McpPool::new(config);
 
-    let (server, tool) = pool
+    let error = pool
         .parse_prefixed_name("mcp_my_db_execute_sql")
-        .expect("registered underscored server should parse");
-
-    assert_eq!(server, "my_db");
-    assert_eq!(tool, "execute_sql");
+        .expect_err("configured server-prefix collisions must fail closed");
+    assert!(error.to_string().contains("Ambiguous MCP tool name"));
 }
 
 #[test]
@@ -335,6 +333,47 @@ fn expand_env_placeholders_reports_missing_variable_without_secret_value() {
     // value (which in practice carries the secret).
     assert!(err.contains("MCP_TEST_MISSING_SECRET"));
     assert!(!err.contains("Bearer "));
+}
+
+#[test]
+fn reviewed_plugin_environment_uses_only_the_pre_dotenv_snapshot() {
+    let _lock = crate::test_support::lock_test_env();
+    let dir = tempfile::tempdir().unwrap();
+    let plugin_base = dir.path().join("plugins/env-snapshot");
+    fs::create_dir_all(&plugin_base).unwrap();
+    fs::write(
+        plugin_base.join("plugin.toml"),
+        "schema_version = 1\n[plugin]\nname = \"env-snapshot\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    let (_, authority) = active_plugin_fixture(&plugin_base);
+    let snapshot = crate::plugins::HostEnvironment::from_entries([(
+        OsString::from("PLUGIN_SNAPSHOT_TOKEN"),
+        OsString::from("captured-before-dotenv"),
+    )]);
+    let mut server = test_server_config();
+    server
+        .env
+        .insert("TOKEN".to_string(), "${PLUGIN_SNAPSHOT_TOKEN}".to_string());
+    server.reviewed_plugin =
+        Some(ReviewedPluginMcpSource::from_authority(authority, None, Arc::new(snapshot)).unwrap());
+    let _late_dotenv = crate::test_support::EnvVarGuard::set(
+        "PLUGIN_SNAPSHOT_TOKEN",
+        "workspace-dotenv-must-not-win",
+    );
+
+    let expanded = expanded_mcp_stdio_env(&server).unwrap();
+    assert_eq!(expanded["TOKEN"], "captured-before-dotenv");
+
+    server.reviewed_plugin.as_mut().unwrap().host_environment =
+        Arc::new(crate::plugins::HostEnvironment::from_entries([]));
+    let error = expanded_mcp_stdio_env(&server)
+        .expect_err("a value present only after dotenv must fail closed");
+    assert!(
+        format!("{error:#}").contains("PLUGIN_SNAPSHOT_TOKEN"),
+        "unexpected missing-snapshot error: {error:#}"
+    );
+    assert!(!format!("{error:#}").contains("workspace-dotenv-must-not-win"));
 }
 
 fn write_path_only_test_command(dir: &Path) -> String {
@@ -898,7 +937,7 @@ network_hosts = ["example.invalid"]
 
     assert!(cfg.servers.contains_key("global"));
 
-    let local = cfg.servers.get("fleet-local").unwrap();
+    let local = cfg.servers.get("plugin-5-fleet-local").unwrap();
     assert_eq!(local.command.as_deref(), Some("node"));
     let staged_root = plugin_for_collision.staged_root.as_deref().unwrap();
     assert_eq!(
@@ -915,13 +954,13 @@ network_hosts = ["example.invalid"]
         Some(staged_root.join("servers/local").as_path())
     );
 
-    let remote = cfg.servers.get("fleet-remote").unwrap();
+    let remote = cfg.servers.get("plugin-5-fleet-remote").unwrap();
     assert_eq!(remote.url.as_deref(), Some("https://example.invalid/mcp"));
     assert!(remote.cwd.is_none());
 
     let mut explicit = McpConfig::default();
     explicit.servers.insert(
-        "fleet-local".to_string(),
+        "plugin-5-fleet-local".to_string(),
         serde_json::from_str(r#"{"command":"node","args":["explicit.js"]}"#).unwrap(),
     );
     let collision_safe = merge_plugin_mcp_servers_from_plugins(
@@ -934,10 +973,20 @@ network_hosts = ["example.invalid"]
     )
     .unwrap();
     assert_eq!(
-        collision_safe.servers["fleet-local"].args,
+        collision_safe.servers["plugin-5-fleet-local"].args,
         vec!["explicit.js"],
         "explicit MCP config must outrank a colliding plugin server"
     );
+}
+
+#[test]
+fn plugin_server_ids_are_unambiguous_across_hyphenated_plugin_and_server_names() {
+    let left = qualified_plugin_server_name("foo-bar", "baz");
+    let right = qualified_plugin_server_name("foo", "bar-baz");
+
+    assert_eq!(left, "plugin-7-foo-bar-baz");
+    assert_eq!(right, "plugin-3-foo-bar-baz");
+    assert_ne!(left, right);
 }
 
 #[test]
@@ -1111,7 +1160,9 @@ connect_timeout = 1
     )
     .unwrap();
     assert!(
-        merged.servers["guarded-local"].reviewed_plugin.is_some(),
+        merged.servers["plugin-7-guarded-local"]
+            .reviewed_plugin
+            .is_some(),
         "plugin provenance must survive through MCP pool construction"
     );
     let mut pool = McpPool::new(merged);
@@ -1123,13 +1174,13 @@ connect_timeout = 1
     fs::write(&server_path, "#!/bin/sh\n: > executed.marker\nexit 0\n").unwrap();
 
     let error = pool
-        .get_or_connect("guarded-local")
+        .get_or_connect("plugin-7-guarded-local")
         .await
         .err()
         .expect("changed reviewed component must be denied before spawn");
     let message = format!("{error:#}");
     assert!(
-        message.contains("Refusing to use MCP server 'guarded-local'"),
+        message.contains("Refusing to use MCP server 'plugin-7-guarded-local'"),
         "unexpected pre-spawn denial: {message}"
     );
     assert!(message.contains("changed after review"));
@@ -1212,10 +1263,10 @@ read_timeout = 30
     )
     .unwrap();
     let mut pool = McpPool::new(merged);
-    pool.get_or_connect("revoked-local").await.unwrap();
+    pool.get_or_connect("plugin-7-revoked-local").await.unwrap();
 
     let call = tokio::spawn(async move {
-        pool.call_tool("mcp_revoked-local_wait", serde_json::json!({}))
+        pool.call_tool("mcp_plugin-7-revoked-local_wait", serde_json::json!({}))
             .await
     });
     for _ in 0..100 {
@@ -1260,8 +1311,14 @@ async fn plugin_stdio_authority_cancellation_terminates_an_idle_child() {
         "-c".to_string(),
         "trap 'exit 0' TERM INT; while :; do sleep 1; done".to_string(),
     ];
-    config.reviewed_plugin =
-        Some(ReviewedPluginMcpSource::from_authority(authority, None).unwrap());
+    config.reviewed_plugin = Some(
+        ReviewedPluginMcpSource::from_authority(
+            authority,
+            None,
+            Arc::new(crate::plugins::HostEnvironment::capture()),
+        )
+        .unwrap(),
+    );
     let cancellation = tokio_util::sync::CancellationToken::new();
     let transport = StdioTransport::spawn(
         "idle-child",
@@ -1304,8 +1361,14 @@ async fn plugin_stdio_does_not_surface_reviewed_child_stderr() {
         "-c".to_string(),
         "echo 'ARBITRARY_PLUGIN_CREDENTIAL' 1>&2; exit 1".to_string(),
     ];
-    config.reviewed_plugin =
-        Some(ReviewedPluginMcpSource::from_authority(authority, None).unwrap());
+    config.reviewed_plugin = Some(
+        ReviewedPluginMcpSource::from_authority(
+            authority,
+            None,
+            Arc::new(crate::plugins::HostEnvironment::capture()),
+        )
+        .unwrap(),
+    );
     let mut transport = StdioTransport::spawn(
         "stderr-secret",
         config.command.as_deref().unwrap(),
@@ -1353,7 +1416,12 @@ async fn revoked_plugin_mcp_denies_catalog_tool_resource_and_prompt_operations()
         sent: Arc::clone(&sent),
         responses: VecDeque::new(),
     }));
-    let source = ReviewedPluginMcpSource::from_authority(authority, None).unwrap();
+    let source = ReviewedPluginMcpSource::from_authority(
+        authority,
+        None,
+        Arc::new(crate::plugins::HostEnvironment::capture()),
+    )
+    .unwrap();
     connection.config.reviewed_plugin = Some(source.clone());
     connection.tools.push(McpTool {
         name: "echo".to_string(),
@@ -1423,6 +1491,66 @@ async fn revoked_plugin_mcp_denies_catalog_tool_resource_and_prompt_operations()
     assert!(
         sent.lock().unwrap().is_empty(),
         "revoked plugin MCP operation reached the transport"
+    );
+}
+
+#[tokio::test]
+async fn reviewed_plugin_oauth_is_disabled_without_network_or_token_mutation() {
+    let dir = tempfile::tempdir().unwrap();
+    let plugin_base = dir.path().join("plugins/oauth-disabled");
+    fs::create_dir_all(&plugin_base).unwrap();
+    fs::write(
+        plugin_base.join("plugin.toml"),
+        "schema_version = 1\n[plugin]\nname = \"oauth-disabled\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    let (_, authority) = active_plugin_fixture(&plugin_base);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/mcp", listener.local_addr().unwrap());
+    let mut server = test_server_config();
+    server.command = None;
+    server.url = Some(endpoint.clone());
+    server.reviewed_plugin = Some(
+        ReviewedPluginMcpSource::from_authority(
+            authority,
+            Some(&endpoint),
+            Arc::new(crate::plugins::HostEnvironment::default()),
+        )
+        .unwrap(),
+    );
+
+    assert_eq!(
+        oauth::auth_status_for_server("plugin-oauth", &server).await,
+        oauth::McpAuthStatus::Unsupported
+    );
+    assert!(oauth::oauth_login_support(&server).await.unwrap().is_none());
+    assert!(
+        oauth::McpOAuthRuntime::from_server_config(
+            "plugin-oauth",
+            &server,
+            reqwest::header::HeaderMap::new(),
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    let login_error =
+        oauth::perform_oauth_login_for_server("plugin-oauth", &server, None, None, None)
+            .await
+            .expect_err("plugin OAuth login must be disabled")
+            .to_string();
+    assert!(login_error.contains("disabled for plugin-contributed MCP servers"));
+    let logout_error = oauth::delete_oauth_tokens_for_server("plugin-oauth", &server)
+        .expect_err("plugin OAuth logout must not touch token storage")
+        .to_string();
+    assert!(logout_error.contains("storage is disabled"));
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), listener.accept())
+            .await
+            .is_err(),
+        "plugin OAuth disabled paths must not probe the network"
     );
 }
 
@@ -2390,6 +2518,42 @@ async fn discover_tools_sorts_by_name_for_cache_stability() {
     );
 }
 
+#[tokio::test]
+async fn discover_tools_rejects_a_repeated_pagination_cursor_without_publishing_partials() {
+    let transport = ScriptedValueTransport {
+        sent: Arc::new(Mutex::new(Vec::new())),
+        responses: VecDeque::from([
+            json_frame(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "tools": [{ "name": "first", "inputSchema": {} }],
+                    "nextCursor": "same"
+                }
+            })),
+            json_frame(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "result": {
+                    "tools": [{ "name": "second", "inputSchema": {} }],
+                    "nextCursor": "same"
+                }
+            })),
+        ]),
+    };
+    let mut conn = test_connection(Box::new(transport));
+
+    let error = conn
+        .discover_tools()
+        .await
+        .expect_err("repeated cursor must abort discovery");
+    assert!(error.to_string().contains("repeated pagination cursor"));
+    assert!(
+        conn.tools.is_empty(),
+        "an aborted catalogue must not publish attacker-controlled partial entries"
+    );
+}
+
 #[test]
 fn mcp_tool_description_formatter_is_one_line_and_unicode_safe() {
     let long_cjk = format!("{}\n这行不应显示", "鲸".repeat(81));
@@ -2649,7 +2813,7 @@ async fn mcp_pool_call_tool_preserves_server_names_with_underscores() {
 }
 
 #[tokio::test]
-async fn mcp_pool_call_tool_prefers_longest_matching_server_name() {
+async fn mcp_pool_hides_and_rejects_ambiguous_model_tool_names() {
     let sent_short = Arc::new(Mutex::new(Vec::new()));
     let short_transport = ScriptedValueTransport {
         sent: Arc::clone(&sent_short),
@@ -2691,25 +2855,26 @@ async fn mcp_pool_call_tool_prefers_longest_matching_server_name() {
     pool.connections.insert("my".to_string(), short_conn);
     pool.connections.insert("my_db".to_string(), long_conn);
 
-    let result = pool
+    assert!(
+        pool.all_tools().is_empty(),
+        "ambiguous names must never be advertised to the model"
+    );
+    let error = pool
         .call_tool(
             "mcp_my_db_execute_sql",
             serde_json::json!({"query": "select 1"}),
         )
         .await
-        .unwrap();
+        .expect_err("ambiguous tool route must fail closed");
 
-    assert_eq!(result, serde_json::json!({"long": true}));
+    assert!(error.to_string().contains("Ambiguous MCP tool name"));
     assert!(
         sent_short.lock().unwrap().is_empty(),
-        "the shorter server name must not receive the tool call"
+        "neither authority may receive an ambiguous tool call"
     );
-    let sent_long = sent_long.lock().unwrap();
-    assert_eq!(sent_long[0]["method"], "tools/call");
-    assert_eq!(sent_long[0]["params"]["name"], "execute_sql");
-    assert_eq!(
-        sent_long[0]["params"]["arguments"],
-        serde_json::json!({"query": "select 1"})
+    assert!(
+        sent_long.lock().unwrap().is_empty(),
+        "neither authority may receive an ambiguous tool call"
     );
 }
 
@@ -4117,7 +4282,7 @@ async fn legacy_sse_session_expiry_is_marked_stale() {
             .unwrap();
     });
 
-    let (_sender, receiver) = mpsc::unbounded_channel();
+    let (_sender, receiver) = mpsc::channel(1);
     let sse_task = tokio::spawn(async {});
     let mut transport = SseTransport {
         client: test_http_client(),
@@ -4125,7 +4290,6 @@ async fn legacy_sse_session_expiry_is_marked_stale() {
         auth: McpHttpAuth::default(),
         endpoint_url: Some(format!("http://{addr}/messages")),
         receiver,
-        pending_messages: VecDeque::new(),
         sse_task,
     };
 

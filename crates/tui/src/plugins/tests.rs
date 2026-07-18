@@ -130,6 +130,58 @@ fn content_change_invalidates_trust_without_changing_capabilities() {
 }
 
 #[test]
+fn aba_source_skill_body_is_replaced_by_the_staged_snapshot_before_activation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = config(tmp.path());
+    let plugin = write_plugin(&config, "\n[skills]\npath = \"skills\"\n");
+    let skill_path = plugin.join("skills/demo/SKILL.md");
+    fs::create_dir_all(skill_path.parent().unwrap()).unwrap();
+    fs::write(
+        &skill_path,
+        "---\nname: demo\ndescription: stable\n---\nbody A\n",
+    )
+    .unwrap();
+
+    // Capture authority A, parse a transient B body, then restore source A.
+    // This deterministically models the old discovery A -> B -> A race.
+    let mut authority_a = discover_with_config(&config);
+    fs::write(
+        &skill_path,
+        "---\nname: demo\ndescription: transient\n---\nbody B\n",
+    )
+    .unwrap();
+    let transient_b = discover_with_config(&config)
+        .get("demo")
+        .unwrap()
+        .skill_snapshots
+        .clone();
+    fs::write(
+        &skill_path,
+        "---\nname: demo\ndescription: stable\n---\nbody A\n",
+    )
+    .unwrap();
+    authority_a.replace_skill_snapshots_for_test("demo", transient_b);
+    assert!(
+        authority_a.get("demo").unwrap().skill_snapshots[0]
+            .body
+            .contains("body B")
+    );
+
+    authority_a.trust("demo").unwrap();
+    authority_a.enable("demo").unwrap();
+    let active = authority_a.get("demo").unwrap();
+    assert!(active.active());
+    assert!(active.skill_snapshots[0].body.contains("body A"));
+    assert!(!active.skill_snapshots[0].body.contains("body B"));
+    assert!(
+        active.skill_snapshots[0]
+            .path
+            .starts_with(active.staged_root.as_ref().unwrap()),
+        "active Skill paths must point into the Codewhale-owned staged tree"
+    );
+}
+
+#[test]
 fn capability_escalation_invalidates_trust_and_stays_inactive() {
     let tmp = tempfile::tempdir().unwrap();
     let config = config(tmp.path());

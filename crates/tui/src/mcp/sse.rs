@@ -1,4 +1,3 @@
-use std::collections::VecDeque;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -9,13 +8,14 @@ use super::{
     find_sse_event_separator_bytes, is_mcp_stale_session_body, mask_url_secrets, sse_field_value,
 };
 
+const SSE_INBOUND_CHANNEL_CAPACITY: usize = 4;
+
 pub(super) struct SseTransport {
     pub(super) client: reqwest::Client,
     pub(super) base_url: String,
     pub(super) auth: McpHttpAuth,
     pub(super) endpoint_url: Option<String>,
-    pub(super) receiver: tokio::sync::mpsc::UnboundedReceiver<SseInbound>,
-    pub(super) pending_messages: VecDeque<Vec<u8>>,
+    pub(super) receiver: tokio::sync::mpsc::Receiver<SseInbound>,
     #[allow(dead_code)]
     pub(super) sse_task: tokio::task::JoinHandle<()>,
 }
@@ -33,7 +33,7 @@ impl SseTransport {
         cancel_token: tokio_util::sync::CancellationToken,
         endpoint_timeout: Duration,
     ) -> Result<Self> {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = tokio::sync::mpsc::channel(SSE_INBOUND_CHANNEL_CAPACITY);
         let client_clone = client.clone();
         let url_clone = url.clone();
         let auth_clone = auth.clone();
@@ -77,7 +77,6 @@ impl SseTransport {
             auth,
             endpoint_url: None,
             receiver: rx,
-            pending_messages: VecDeque::new(),
             sse_task,
         };
         transport
@@ -90,7 +89,7 @@ impl SseTransport {
         client: reqwest::Client,
         url: String,
         auth: McpHttpAuth,
-        tx: tokio::sync::mpsc::UnboundedSender<SseInbound>,
+        tx: tokio::sync::mpsc::Sender<SseInbound>,
         cancel_token: tokio_util::sync::CancellationToken,
     ) -> Result<()> {
         let headers = tokio::select! {
@@ -179,14 +178,22 @@ impl SseTransport {
                     }
                 }
 
-                match event_type {
-                    "endpoint" => {
-                        let _ = tx.send(SseInbound::Endpoint(data));
-                    }
+                let inbound = match event_type {
+                    "endpoint" => Some(SseInbound::Endpoint(data)),
                     "message" if !data.trim().is_empty() => {
-                        let _ = tx.send(SseInbound::Message(data.into_bytes()));
+                        Some(SseInbound::Message(data.into_bytes()))
                     }
-                    _ => {}
+                    _ => None,
+                };
+                if let Some(inbound) = inbound {
+                    let sent = tokio::select! {
+                        biased;
+                        _ = cancel_token.cancelled() => return Ok(()),
+                        sent = tx.send(inbound) => sent,
+                    };
+                    if sent.is_err() {
+                        return Ok(());
+                    }
                 }
             }
         }
@@ -201,28 +208,25 @@ impl SseTransport {
         let timeout = tokio::time::sleep(endpoint_timeout);
         tokio::pin!(timeout);
 
-        loop {
-            let msg = tokio::select! {
-                _ = cancel_token.cancelled() => {
-                    anyhow::bail!("SSE transport cancelled before endpoint was discovered");
-                }
-                _ = &mut timeout => {
-                    anyhow::bail!(
-                        "SSE endpoint not received within {}ms",
-                        endpoint_timeout.as_millis()
-                    );
-                }
-                msg = self.receiver.recv() => {
-                    msg.context("SSE transport closed before endpoint was discovered")?
-                }
-            };
+        let msg = tokio::select! {
+            _ = cancel_token.cancelled() => {
+                anyhow::bail!("SSE transport cancelled before endpoint was discovered");
+            }
+            _ = &mut timeout => {
+                anyhow::bail!(
+                    "SSE endpoint not received within {}ms",
+                    endpoint_timeout.as_millis()
+                );
+            }
+            msg = self.receiver.recv() => {
+                msg.context("SSE transport closed before endpoint was discovered")?
+            }
+        };
 
-            match msg {
-                SseInbound::Endpoint(endpoint) => {
-                    self.store_endpoint(&endpoint)?;
-                    return Ok(());
-                }
-                SseInbound::Message(msg) => self.pending_messages.push_back(msg),
+        match msg {
+            SseInbound::Endpoint(endpoint) => self.store_endpoint(&endpoint),
+            SseInbound::Message(_) => {
+                anyhow::bail!("MCP SSE server sent a message before declaring its endpoint");
             }
         }
     }
@@ -309,10 +313,6 @@ impl McpTransport for SseTransport {
 
     async fn recv(&mut self) -> Result<Vec<u8>> {
         loop {
-            if let Some(msg) = self.pending_messages.pop_front() {
-                return Ok(msg);
-            }
-
             match self.receiver.recv().await.context("SSE transport closed")? {
                 SseInbound::Endpoint(endpoint) => {
                     self.store_endpoint(&endpoint)?;
@@ -338,7 +338,9 @@ impl Drop for SseTransport {
 
 #[cfg(test)]
 mod endpoint_tests {
-    use super::SseTransport;
+    use std::time::Duration;
+
+    use super::{McpHttpAuth, SseInbound, SseTransport};
 
     #[test]
     fn resolve_endpoint_accepts_relative_and_same_origin() {
@@ -368,5 +370,30 @@ mod endpoint_tests {
         assert!(
             SseTransport::resolve_endpoint_url(base, "https://mcp.example.com:8443/x").is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn message_before_endpoint_is_rejected_instead_of_buffered() {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        tx.send(SseInbound::Message(br#"{"jsonrpc":"2.0"}"#.to_vec()))
+            .await
+            .unwrap();
+        let mut transport = SseTransport {
+            client: reqwest::Client::new(),
+            base_url: "https://example.invalid/sse".to_string(),
+            auth: McpHttpAuth::default(),
+            endpoint_url: None,
+            receiver: rx,
+            sse_task: tokio::spawn(async {}),
+        };
+
+        let error = transport
+            .wait_for_endpoint(
+                &tokio_util::sync::CancellationToken::new(),
+                Duration::from_secs(1),
+            )
+            .await
+            .expect_err("pre-endpoint message must fail closed");
+        assert!(error.to_string().contains("before declaring its endpoint"));
     }
 }

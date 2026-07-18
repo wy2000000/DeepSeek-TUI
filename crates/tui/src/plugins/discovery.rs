@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use super::manifest::PluginManifest;
+use super::manifest::{PluginManifest, ValidatedManifest};
 use super::registry::PluginRegistry;
 use super::types::{
     LoadedPlugin, PluginDiagnostic, PluginId, PluginOrigin, PluginScope, PluginSkillSnapshot,
@@ -73,13 +73,21 @@ pub fn default_state_path() -> PathBuf {
     default_user_plugins_dir().join(STATE_FILE)
 }
 
+#[cfg(test)]
 #[must_use]
-pub fn discover_all(workspace: &Path) -> PluginRegistry {
-    discover_with_config(&DiscoveryConfig::for_workspace(workspace))
+pub fn discover_with_config(config: &DiscoveryConfig) -> PluginRegistry {
+    let context = super::context::PluginDiscoveryContext::from_config_and_environment(
+        config,
+        super::context::HostEnvironment::capture(),
+    );
+    discover_with_context(config, context)
 }
 
 #[must_use]
-pub fn discover_with_config(config: &DiscoveryConfig) -> PluginRegistry {
+pub(crate) fn discover_with_context(
+    config: &DiscoveryConfig,
+    context: std::sync::Arc<super::context::PluginDiscoveryContext>,
+) -> PluginRegistry {
     let mut diagnostics = Vec::new();
     let mut candidates = Vec::new();
 
@@ -149,6 +157,7 @@ pub fn discover_with_config(config: &DiscoveryConfig) -> PluginRegistry {
         diagnostics,
         config.state_path.clone(),
         config.workspace.clone(),
+        Some(context),
     )
 }
 
@@ -286,6 +295,49 @@ fn load_plugin(
         })
         .collect::<Vec<_>>();
 
+    let (skill_snapshots, skill_diagnostics) = parse_skill_snapshots(&validated)?;
+    diagnostics.extend(skill_diagnostics);
+
+    // Skill parsing happens after hashing. Revalidate once so a concurrent
+    // bundle edit cannot pair a reviewed hash with different in-memory Skill
+    // instructions or MCP configuration. Active Skill bodies are replaced by
+    // snapshots parsed from the Codewhale-owned staged tree in `apply_state`.
+    let refreshed = PluginManifest::validate_from_path(manifest_path)?;
+    if refreshed.content_hash != validated.content_hash
+        || refreshed.capability_hash != validated.capability_hash
+    {
+        return Err(format!(
+            "plugin `{}` changed during discovery; reload and review the stable bundle",
+            validated.manifest.plugin.name
+        ));
+    }
+    let validated = refreshed;
+
+    Ok(LoadedPlugin {
+        id,
+        manifest: validated.manifest,
+        base_path: validated.canonical_root.clone(),
+        canonical_root: validated.canonical_root,
+        staged_root: None,
+        scope,
+        origin,
+        enabled: false,
+        trust_status: PluginTrustStatus::NeverReviewed,
+        applicable: validated.applicable,
+        inventory: validated.inventory,
+        components: validated.components,
+        content_hash: validated.content_hash,
+        capability_hash: validated.capability_hash,
+        state_generation: 0,
+        skill_snapshots,
+        diagnostics,
+    })
+}
+
+fn parse_skill_snapshots(
+    validated: &ValidatedManifest,
+) -> Result<(Vec<PluginSkillSnapshot>, Vec<PluginDiagnostic>), String> {
+    let mut diagnostics = Vec::new();
     let mut skill_snapshots = Vec::new();
     for skills_dir in &validated.components.skills {
         let registry = crate::skills::SkillRegistry::discover(skills_dir);
@@ -321,39 +373,29 @@ fn load_plugin(
         }
     }
 
-    // Skill parsing happens after hashing. Revalidate once so a concurrent
-    // bundle edit cannot pair a reviewed hash with different in-memory Skill
-    // instructions or MCP configuration.
-    let refreshed = PluginManifest::validate_from_path(manifest_path)?;
-    if refreshed.content_hash != validated.content_hash
-        || refreshed.capability_hash != validated.capability_hash
+    Ok((skill_snapshots, diagnostics))
+}
+
+pub(crate) fn load_staged_skill_snapshots(
+    staged_root: &Path,
+    expected_content_hash: &str,
+    expected_capability_hash: &str,
+) -> Result<Vec<PluginSkillSnapshot>, String> {
+    let validated = PluginManifest::validate_from_path(&staged_root.join(PLUGIN_MANIFEST))?;
+    if validated.canonical_root != staged_root
+        || validated.content_hash != expected_content_hash
+        || validated.capability_hash != expected_capability_hash
     {
+        return Err("staged plugin Skill snapshot no longer matches reviewed content".to_string());
+    }
+    let (snapshots, diagnostics) = parse_skill_snapshots(&validated)?;
+    if let Some(diagnostic) = diagnostics.first() {
         return Err(format!(
-            "plugin `{}` changed during discovery; reload and review the stable bundle",
-            validated.manifest.plugin.name
+            "staged plugin Skill snapshot is invalid: {}",
+            diagnostic.message
         ));
     }
-    let validated = refreshed;
-
-    Ok(LoadedPlugin {
-        id,
-        manifest: validated.manifest,
-        base_path: validated.canonical_root.clone(),
-        canonical_root: validated.canonical_root,
-        staged_root: None,
-        scope,
-        origin,
-        enabled: false,
-        trust_status: PluginTrustStatus::NeverReviewed,
-        applicable: validated.applicable,
-        inventory: validated.inventory,
-        components: validated.components,
-        content_hash: validated.content_hash,
-        capability_hash: validated.capability_hash,
-        state_generation: 0,
-        skill_snapshots,
-        diagnostics,
-    })
+    Ok(snapshots)
 }
 
 #[cfg(test)]
@@ -506,7 +548,8 @@ mod tests {
             "cursor-plugin",
         );
 
-        let registry = discover_all(&workspace);
+        let discovery = crate::plugins::PluginDiscoveryContext::capture_pre_dotenv();
+        let registry = discovery.registry_for_workspace(&workspace);
         assert!(registry.is_empty());
         assert!(!home.join("plugins/state.json").exists());
     }

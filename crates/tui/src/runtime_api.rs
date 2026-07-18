@@ -92,6 +92,7 @@ use self::workspace::{collect_workspace_git_metadata, workspace_status};
 pub struct RuntimeApiState {
     config: Arc<parking_lot::RwLock<Config>>,
     workspace: PathBuf,
+    plugin_discovery: Arc<crate::plugins::PluginDiscoveryContext>,
     task_manager: SharedTaskManager,
     runtime_threads: SharedRuntimeThreadManager,
     cors_origins: Vec<String>,
@@ -440,6 +441,7 @@ struct StartTurnResponse {
 pub async fn run_http_server(
     config: Config,
     workspace: PathBuf,
+    plugin_discovery: Arc<crate::plugins::PluginDiscoveryContext>,
     options: RuntimeApiOptions,
 ) -> Result<()> {
     if options.port == 0 {
@@ -458,10 +460,11 @@ pub async fn run_http_server(
         config.default_text_model.clone(),
         Some(options.workers),
     );
-    let runtime_threads = Arc::new(RuntimeThreadManager::open(
+    let runtime_threads = Arc::new(RuntimeThreadManager::open_with_plugin_registry(
         config.clone(),
         workspace.clone(),
         RuntimeThreadManagerConfig::from_task_data_dir(task_cfg.data_dir.clone()),
+        plugin_discovery.registry_for_workspace(&workspace),
     )?);
     let task_manager =
         TaskManager::start_with_runtime_manager(task_cfg, config.clone(), runtime_threads.clone())
@@ -511,6 +514,7 @@ pub async fn run_http_server(
     let state = RuntimeApiState {
         config: Arc::new(parking_lot::RwLock::new(config.clone())),
         workspace,
+        plugin_discovery,
         task_manager,
         runtime_threads,
         cors_origins: options.cors_origins.clone(),
@@ -1534,8 +1538,15 @@ async fn list_mcp_servers(
     State(state): State<RuntimeApiState>,
 ) -> Result<Json<McpServersResponse>, ApiError> {
     let mcp_config_path = state.config.read().mcp_config_path();
-    let config = crate::mcp::load_config_with_workspace(&mcp_config_path, &state.workspace)
-        .map_err(|e| ApiError::internal(format!("Failed to load MCP config: {e}")))?;
+    let plugin_registry = state
+        .plugin_discovery
+        .registry_for_workspace(&state.workspace);
+    let config = crate::mcp::load_config_with_workspace_and_plugins(
+        &mcp_config_path,
+        &state.workspace,
+        plugin_registry.as_ref(),
+    )
+    .map_err(|e| ApiError::internal(format!("Failed to load MCP config: {e}")))?;
 
     let mut servers = Vec::new();
     for (name, server_cfg) in config.servers {
@@ -1568,11 +1579,15 @@ async fn list_mcp_tools(
             Some(pool) => Some(Arc::clone(pool)),
             None if query.connect => {
                 let mcp_config_path = state.config.read().mcp_config_path();
-                let new_pool =
-                    McpPool::from_config_path_with_workspace(&mcp_config_path, &state.workspace)
-                        .map_err(|e| {
-                            ApiError::internal(format!("Failed to load MCP config: {e}"))
-                        })?;
+                let plugin_registry = state
+                    .plugin_discovery
+                    .registry_for_workspace(&state.workspace);
+                let new_pool = McpPool::from_config_path_with_workspace_and_plugins(
+                    &mcp_config_path,
+                    &state.workspace,
+                    plugin_registry,
+                )
+                .map_err(|e| ApiError::internal(format!("Failed to load MCP config: {e}")))?;
                 let handle = Arc::new(Mutex::new(new_pool));
                 pool_slot.replace(Arc::clone(&handle));
                 Some(handle)

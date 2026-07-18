@@ -70,6 +70,26 @@ pub fn build_entries(
     mcp_config_path: &Path,
     mcp_snapshot: Option<&crate::mcp::McpManagerSnapshot>,
 ) -> Vec<CommandPaletteEntry> {
+    build_entries_with_plugins(
+        locale,
+        skills_dir,
+        skills_scan_codewhale_only,
+        workspace,
+        mcp_config_path,
+        mcp_snapshot,
+        &crate::plugins::PluginRegistry::empty(workspace),
+    )
+}
+
+pub fn build_entries_with_plugins(
+    locale: Locale,
+    skills_dir: &Path,
+    skills_scan_codewhale_only: bool,
+    workspace: &Path,
+    mcp_config_path: &Path,
+    mcp_snapshot: Option<&crate::mcp::McpManagerSnapshot>,
+    plugins: &crate::plugins::PluginRegistry,
+) -> Vec<CommandPaletteEntry> {
     let mut entries = Vec::new();
     commands::user_registry::with_registry_for_workspace(Some(workspace), |user_registry| {
         for command in commands::command_infos() {
@@ -222,7 +242,12 @@ pub fn build_entries(
     tool_entries.sort_by(|a, b| a.label.cmp(&b.label));
     entries.extend(tool_entries);
 
-    entries.extend(build_mcp_entries(workspace, mcp_config_path, mcp_snapshot));
+    entries.extend(build_mcp_entries(
+        workspace,
+        mcp_config_path,
+        mcp_snapshot,
+        plugins,
+    ));
 
     entries.sort_by(|a, b| a.label.cmp(&b.label));
     entries.sort_by_key(|entry| entry.section);
@@ -255,10 +280,16 @@ fn build_mcp_entries(
     workspace: &Path,
     mcp_config_path: &Path,
     mcp_snapshot: Option<&crate::mcp::McpManagerSnapshot>,
+    plugins: &crate::plugins::PluginRegistry,
 ) -> Vec<CommandPaletteEntry> {
     let owned_snapshot = if mcp_snapshot.is_none() {
-        crate::mcp::manager_snapshot_from_config_with_workspace(mcp_config_path, workspace, false)
-            .ok()
+        crate::mcp::manager_snapshot_from_config_with_workspace_and_plugins(
+            mcp_config_path,
+            workspace,
+            false,
+            plugins,
+        )
+        .ok()
     } else {
         None
     };

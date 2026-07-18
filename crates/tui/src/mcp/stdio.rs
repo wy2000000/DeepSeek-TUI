@@ -102,11 +102,12 @@ impl StdioTransport {
         // secret-scrubbed child environment plus their explicitly reviewed
         // mappings, so namespaces such as NPM_CONFIG_* are never inherited
         // ambiently across the consent boundary.
-        if config.reviewed_plugin.is_some() {
+        if let Some(reviewed_plugin) = config.reviewed_plugin.as_ref() {
             cmd.env_clear();
-            for (key, value) in
-                child_env::sanitized_plugin_mcp_env(child_env::string_map_env(&expanded_env))
-            {
+            for (key, value) in child_env::sanitized_plugin_mcp_env_from(
+                reviewed_plugin.host_environment.entries().iter().cloned(),
+                child_env::string_map_env(&expanded_env),
+            ) {
                 cmd.env(key, value);
             }
         } else {

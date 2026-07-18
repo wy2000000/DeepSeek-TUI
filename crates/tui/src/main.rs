@@ -9,6 +9,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -1347,11 +1348,19 @@ fn main() -> Result<()> {
     // configuration, MCP, trust, sandbox, executable lookup, or plugin
     // discovery. Plugin discovery therefore runs first, and the loader below
     // admits only built-in provider credential names from a stable file read.
+    let cli = Cli::parse();
+    let workspace = resolve_workspace(&cli);
+    let mut plugin_registry = None;
     let (cli, command) = prepare_cli_startup(
-        Cli::parse(),
-        || crate::plugins::init_registry(&[]),
+        cli,
+        || {
+            let discovery = crate::plugins::PluginDiscoveryContext::capture_pre_dotenv();
+            plugin_registry = Some(discovery.registry_for_workspace(&workspace));
+        },
         warn_on_workspace_dotenv_result,
     );
+    let plugin_registry = plugin_registry
+        .expect("plugin discovery initialization must precede workspace dotenv loading");
 
     // The interactive runtime intentionally carries a large state machine:
     // terminal rendering, modal dispatch, provider setup, and fleet/workflow
@@ -1363,7 +1372,7 @@ fn main() -> Result<()> {
     let runtime_thread = std::thread::Builder::new()
         .name("codewhale-main".to_string())
         .stack_size(CODEWHALE_MAIN_STACK_BYTES)
-        .spawn(move || run_async_main(cli, command))
+        .spawn(move || run_async_main(cli, command, plugin_registry))
         .context("Failed to start the Codewhale runtime thread")?;
     match runtime_thread.join() {
         Ok(result) => result,
@@ -1379,7 +1388,11 @@ fn main() -> Result<()> {
 }
 
 #[tokio::main]
-async fn run_async_main(cli: Cli, command: Option<Commands>) -> Result<()> {
+async fn run_async_main(
+    cli: Cli,
+    command: Option<Commands>,
+    plugin_registry: Arc<crate::plugins::PluginRegistry>,
+) -> Result<()> {
     // Install signal handlers that restore the terminal before the
     // process exits. Without this, Ctrl+C delivered while raw mode /
     // kitty keyboard enhancement / alt-screen are active (or in the
@@ -1419,9 +1432,21 @@ async fn run_async_main(cli: Cli, command: Option<Commands>) -> Result<()> {
                 if args.context_json {
                     run_doctor_context_json(&config, &workspace)
                 } else if args.json {
-                    run_doctor_json(&config, &workspace, cli.config.as_deref())
+                    run_doctor_json(
+                        &config,
+                        &workspace,
+                        cli.config.as_deref(),
+                        plugin_registry.as_ref(),
+                    )
                 } else {
-                    run_doctor(&config, &workspace, cli.config.as_deref(), args.probe_local).await;
+                    run_doctor(
+                        &config,
+                        &workspace,
+                        cli.config.as_deref(),
+                        args.probe_local,
+                        plugin_registry.as_ref(),
+                    )
+                    .await;
                     Ok(())
                 }
             }
@@ -1429,7 +1454,7 @@ async fn run_async_main(cli: Cli, command: Option<Commands>) -> Result<()> {
             Commands::Setup(args) => {
                 let config = load_config_from_cli(&cli)?;
                 let workspace = resolve_workspace(&cli);
-                run_setup(&config, &workspace, args)
+                run_setup(&config, &workspace, args, plugin_registry.as_ref())
             }
             Commands::RemoteSetup(args) => remote_setup::run_remote_setup(args),
             Commands::Completions { shell } => {
@@ -1568,6 +1593,7 @@ async fn run_async_main(cli: Cli, command: Option<Commands>) -> Result<()> {
                         allowed_tools,
                         disallowed_tools,
                         args.append_system_prompt.clone(),
+                        std::sync::Arc::clone(&plugin_registry),
                     )
                     .await
                 } else if args.json {
@@ -1581,7 +1607,9 @@ async fn run_async_main(cli: Cli, command: Option<Commands>) -> Result<()> {
                 let workspace = resolve_workspace(&cli);
                 run_fleet_command(&workspace, &config, args).await
             }
-            Commands::WorkflowTool(args) => run_workflow_tool_command(&cli, args).await,
+            Commands::WorkflowTool(args) => {
+                run_workflow_tool_command(&cli, args, std::sync::Arc::clone(&plugin_registry)).await
+            }
             Commands::Review(args) => {
                 let config = load_config_from_cli(&cli)?;
                 run_review(&config, args).await
@@ -1592,7 +1620,15 @@ async fn run_async_main(cli: Cli, command: Option<Commands>) -> Result<()> {
                 checkout,
             } => {
                 let config = load_config_from_cli(&cli)?;
-                run_pr(&cli, &config, number, repo.as_deref(), checkout).await
+                run_pr(
+                    &cli,
+                    &config,
+                    number,
+                    repo.as_deref(),
+                    checkout,
+                    Arc::clone(&plugin_registry),
+                )
+                .await
             }
             Commands::Apply(args) => run_apply(args),
             Commands::Eval(args) => run_eval(args),
@@ -1600,7 +1636,7 @@ async fn run_async_main(cli: Cli, command: Option<Commands>) -> Result<()> {
             Commands::Mcp { command } => {
                 let config = load_config_from_cli(&cli)?;
                 let workspace = resolve_workspace(&cli);
-                run_mcp_command(&config, &workspace, command).await
+                run_mcp_command(&config, &workspace, command, plugin_registry.as_ref()).await
             }
             Commands::Execpolicy(command) => {
                 let config = load_config_from_cli(&cli)?;
@@ -1645,6 +1681,7 @@ async fn run_async_main(cli: Cli, command: Option<Commands>) -> Result<()> {
                     runtime_api::run_http_server(
                         config,
                         workspace,
+                        std::sync::Arc::clone(&plugin_discovery),
                         runtime_api::RuntimeApiOptions {
                             host: bind_host.host,
                             port: args.port,
@@ -1672,13 +1709,27 @@ async fn run_async_main(cli: Cli, command: Option<Commands>) -> Result<()> {
                 let config = load_config_from_cli(&cli)?;
                 let workspace = resolve_workspace(&cli);
                 let resume_id = resolve_session_id(session_id, last, &workspace)?;
-                run_interactive(&cli, &config, Some(resume_id), None).await
+                run_interactive(
+                    &cli,
+                    &config,
+                    Some(resume_id),
+                    None,
+                    std::sync::Arc::clone(&plugin_registry),
+                )
+                .await
             }
             Commands::Fork { session_id, last } => {
                 let config = load_config_from_cli(&cli)?;
                 let workspace = resolve_workspace(&cli);
                 let new_session_id = fork_session(&config, session_id, last, &workspace)?;
-                run_interactive(&cli, &config, Some(new_session_id), None).await
+                run_interactive(
+                    &cli,
+                    &config,
+                    Some(new_session_id),
+                    None,
+                    std::sync::Arc::clone(&plugin_registry),
+                )
+                .await
             }
         };
     }
@@ -1688,7 +1739,14 @@ async fn run_async_main(cli: Cli, command: Option<Commands>) -> Result<()> {
     // one-shot behavior (#2370).
     let config = load_config_from_cli(&cli)?;
     if let Some(initial_input) = top_level_prompt_initial_input(&cli.prompt) {
-        return run_interactive(&cli, &config, None, Some(initial_input)).await;
+        return run_interactive(
+            &cli,
+            &config,
+            None,
+            Some(initial_input),
+            std::sync::Arc::clone(&plugin_registry),
+        )
+        .await;
     }
 
     // Handle session resume. Plain `codewhale` starts fresh: interrupted
@@ -1709,7 +1767,7 @@ async fn run_async_main(cli: Cli, command: Option<Commands>) -> Result<()> {
 
     // Default: Interactive TUI
     // --yolo starts in YOLO mode (auto-approve; shell enabled)
-    run_interactive(&cli, &config, resume_session_id, None).await
+    run_interactive(&cli, &config, resume_session_id, None, plugin_registry).await
 }
 
 fn prepare_cli_startup(
@@ -2928,9 +2986,14 @@ fn execute_clean_plan(plan: &CleanPlan) -> Result<Vec<PathBuf>> {
     Ok(removed)
 }
 
-fn run_setup(config: &Config, workspace: &Path, args: SetupArgs) -> Result<()> {
+fn run_setup(
+    config: &Config,
+    workspace: &Path,
+    args: SetupArgs,
+    plugins: &crate::plugins::PluginRegistry,
+) -> Result<()> {
     if args.status {
-        return run_setup_status(config, workspace);
+        return run_setup_status(config, workspace, plugins);
     }
     if args.clean {
         return run_setup_clean(&default_checkpoints_dir(), args.force);
@@ -3197,7 +3260,11 @@ fn skills_count_for(dir: &Path) -> usize {
     crate::skills::SkillRegistry::discover(dir).len()
 }
 
-fn run_setup_status(config: &Config, workspace: &Path) -> Result<()> {
+fn run_setup_status(
+    config: &Config,
+    workspace: &Path,
+    plugins: &crate::plugins::PluginRegistry,
+) -> Result<()> {
     use crate::palette;
     use colored::Colorize;
 
@@ -3283,10 +3350,11 @@ fn run_setup_status(config: &Config, workspace: &Path) -> Result<()> {
 
     let mcp_path = config.mcp_config_path();
     let project_mcp_path = crate::mcp::workspace_mcp_config_path(workspace);
-    let mcp_count = match crate::mcp::load_config_with_workspace(&mcp_path, workspace) {
-        Ok(cfg) => cfg.servers.len(),
-        Err(_) => 0,
-    };
+    let mcp_count =
+        match crate::mcp::load_config_with_workspace_and_plugins(&mcp_path, workspace, plugins) {
+            Ok(cfg) => cfg.servers.len(),
+            Err(_) => 0,
+        };
     let mcp_present = if mcp_path.exists() { "" } else { "  (missing)" };
     let project_mcp_present = if project_mcp_path.exists() {
         ""
@@ -3473,6 +3541,7 @@ async fn run_doctor(
     workspace: &Path,
     config_path_override: Option<&Path>,
     probe_local: bool,
+    plugins: &crate::plugins::PluginRegistry,
 ) {
     use crate::palette;
     use colored::Colorize;
@@ -3860,7 +3929,7 @@ async fn run_doctor(
         );
     }
 
-    match crate::mcp::load_config_with_workspace(&mcp_config_path, workspace) {
+    match crate::mcp::load_config_with_workspace_and_plugins(&mcp_config_path, workspace, plugins) {
         Ok(cfg) if cfg.servers.is_empty() => {
             println!("  {} 0 merged server(s) configured", "·".dimmed());
             if !mcp_config_path.exists() && !project_mcp_config_path.exists() {
@@ -5243,6 +5312,7 @@ fn run_doctor_json(
     config: &Config,
     workspace: &Path,
     config_path_override: Option<&Path>,
+    plugins: &crate::plugins::PluginRegistry,
 ) -> Result<()> {
     use serde_json::json;
 
@@ -5269,7 +5339,11 @@ fn run_doctor_json(
     let project_mcp_config_path = crate::mcp::workspace_mcp_config_path(workspace);
     let mcp_present = mcp_config_path.exists();
     let project_mcp_present = project_mcp_config_path.exists();
-    let mcp_summary = match crate::mcp::load_config_with_workspace(&mcp_config_path, workspace) {
+    let mcp_summary = match crate::mcp::load_config_with_workspace_and_plugins(
+        &mcp_config_path,
+        workspace,
+        plugins,
+    ) {
         Ok(cfg) => {
             let servers: Vec<serde_json::Value> = cfg
                 .servers
@@ -6636,6 +6710,7 @@ async fn run_pr(
     number: u32,
     repo: Option<&str>,
     checkout: bool,
+    plugin_registry: Arc<crate::plugins::PluginRegistry>,
 ) -> Result<()> {
     if !is_command_available("gh") {
         bail!(
@@ -6669,6 +6744,7 @@ async fn run_pr(
         config,
         resume_session_id,
         Some(tui::InitialInput::Prefill(prompt)),
+        plugin_registry,
     )
     .await
 }
@@ -6933,7 +7009,12 @@ fn read_patch_from_stdin() -> Result<String> {
     Ok(buffer)
 }
 
-async fn run_mcp_command(config: &Config, workspace: &Path, command: McpCommand) -> Result<()> {
+async fn run_mcp_command(
+    config: &Config,
+    workspace: &Path,
+    command: McpCommand,
+    plugins: &crate::plugins::PluginRegistry,
+) -> Result<()> {
     let config_path = config.mcp_config_path();
     match command {
         McpCommand::Init { force } => {
@@ -6956,7 +7037,11 @@ async fn run_mcp_command(config: &Config, workspace: &Path, command: McpCommand)
             Ok(())
         }
         McpCommand::List => {
-            let cfg = crate::mcp::load_config_with_workspace(&config_path, workspace)?;
+            let cfg = crate::mcp::load_config_with_workspace_and_plugins(
+                &config_path,
+                workspace,
+                plugins,
+            )?;
             if cfg.servers.is_empty() {
                 println!(
                     "No MCP servers configured in {} or {}",
@@ -7002,7 +7087,11 @@ async fn run_mcp_command(config: &Config, workspace: &Path, command: McpCommand)
             Ok(())
         }
         McpCommand::Connect { server } => {
-            let mut pool = McpPool::from_config_path_with_workspace(&config_path, workspace)?;
+            let mut pool = McpPool::from_config_path_with_workspace_and_plugins(
+                &config_path,
+                workspace,
+                std::sync::Arc::new(plugins.clone()),
+            )?;
             if let Some(name) = server {
                 if let Err(err) = pool.get_or_connect(&name).await {
                     if crate::mcp::oauth::error_looks_auth_required(&err) {
@@ -7028,7 +7117,11 @@ async fn run_mcp_command(config: &Config, workspace: &Path, command: McpCommand)
             Ok(())
         }
         McpCommand::Tools { server } => {
-            let mut pool = McpPool::from_config_path_with_workspace(&config_path, workspace)?;
+            let mut pool = McpPool::from_config_path_with_workspace_and_plugins(
+                &config_path,
+                workspace,
+                std::sync::Arc::new(plugins.clone()),
+            )?;
             if let Some(name) = server {
                 let conn = match pool.get_or_connect(&name).await {
                     Ok(conn) => conn,
@@ -7146,7 +7239,11 @@ async fn run_mcp_command(config: &Config, workspace: &Path, command: McpCommand)
             Ok(())
         }
         McpCommand::Login { name, scopes } => {
-            let cfg = crate::mcp::load_config_with_workspace(&config_path, workspace)?;
+            let cfg = crate::mcp::load_config_with_workspace_and_plugins(
+                &config_path,
+                workspace,
+                plugins,
+            )?;
             let server = cfg
                 .servers
                 .get(&name)
@@ -7164,7 +7261,11 @@ async fn run_mcp_command(config: &Config, workspace: &Path, command: McpCommand)
             Ok(())
         }
         McpCommand::Logout { name } => {
-            let cfg = crate::mcp::load_config_with_workspace(&config_path, workspace)?;
+            let cfg = crate::mcp::load_config_with_workspace_and_plugins(
+                &config_path,
+                workspace,
+                plugins,
+            )?;
             let server = cfg
                 .servers
                 .get(&name)
@@ -7210,7 +7311,11 @@ async fn run_mcp_command(config: &Config, workspace: &Path, command: McpCommand)
             Ok(())
         }
         McpCommand::Validate => {
-            let mut pool = McpPool::from_config_path_with_workspace(&config_path, workspace)?;
+            let mut pool = McpPool::from_config_path_with_workspace_and_plugins(
+                &config_path,
+                workspace,
+                std::sync::Arc::new(plugins.clone()),
+            )?;
             let errors = pool.connect_all().await;
             if errors.is_empty() {
                 println!("MCP config is valid. All enabled servers connected.");
@@ -8085,6 +8190,7 @@ async fn run_interactive(
     config: &Config,
     resume_session_id: Option<String>,
     initial_input: Option<tui::InitialInput>,
+    plugin_registry: std::sync::Arc<crate::plugins::PluginRegistry>,
 ) -> Result<()> {
     let workspace = cli
         .workspace
@@ -8224,6 +8330,7 @@ async fn run_interactive(
             initial_input,
             max_subagents,
         },
+        plugin_registry,
     )
     .await
 }
@@ -8685,8 +8792,12 @@ fn current_binary_sha256() -> Option<String> {
     Some(format!("sha256:{}", crate::hashing::sha256_hex(&bytes)))
 }
 
-async fn run_workflow_tool_command(cli: &Cli, args: WorkflowToolArgs) -> Result<()> {
-    match run_workflow_tool_command_inner(cli, args).await {
+async fn run_workflow_tool_command(
+    cli: &Cli,
+    args: WorkflowToolArgs,
+    plugin_registry: std::sync::Arc<crate::plugins::PluginRegistry>,
+) -> Result<()> {
+    match run_workflow_tool_command_inner(cli, args, plugin_registry).await {
         Ok(()) => Ok(()),
         Err(error) => {
             let _ = emit_exec_stream_event(&ExecStreamEvent::Error {
@@ -8697,7 +8808,11 @@ async fn run_workflow_tool_command(cli: &Cli, args: WorkflowToolArgs) -> Result<
     }
 }
 
-async fn run_workflow_tool_command_inner(cli: &Cli, args: WorkflowToolArgs) -> Result<()> {
+async fn run_workflow_tool_command_inner(
+    cli: &Cli,
+    args: WorkflowToolArgs,
+    plugin_registry: std::sync::Arc<crate::plugins::PluginRegistry>,
+) -> Result<()> {
     use crate::tools::spec::ToolSpec;
 
     if args.approval_source != "explicit-workflow-command" {
@@ -8758,15 +8873,22 @@ async fn run_workflow_tool_command_inner(cli: &Cli, args: WorkflowToolArgs) -> R
     let (event_tx, event_rx) = tokio::sync::mpsc::channel(1024);
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
     let event_forwarder = tokio::spawn(forward_direct_workflow_events(event_rx, stop_rx));
-    let (tool, context) =
-        match build_direct_workflow_tool(&execution_config, &route, &workspace, event_tx).await {
-            Ok(built) => built,
-            Err(err) => {
-                let _ = stop_tx.send(());
-                let _ = event_forwarder.await;
-                exit_workflow_tool_error(&tool_id, err.to_string());
-            }
-        };
+    let (tool, context) = match build_direct_workflow_tool(
+        &execution_config,
+        &route,
+        &workspace,
+        event_tx,
+        plugin_registry,
+    )
+    .await
+    {
+        Ok(built) => built,
+        Err(err) => {
+            let _ = stop_tx.send(());
+            let _ = event_forwarder.await;
+            exit_workflow_tool_error(&tool_id, err.to_string());
+        }
+    };
 
     let result = tool.execute(input, &context).await;
     drop(tool);
@@ -8885,6 +9007,7 @@ async fn initialize_direct_workflow_mcp_pool(
     config: &Config,
     workspace: &Path,
     network_policy: Option<crate::network_policy::NetworkPolicyDecider>,
+    plugin_registry: std::sync::Arc<crate::plugins::PluginRegistry>,
 ) -> Option<(
     std::sync::Arc<tokio::sync::Mutex<crate::mcp::McpPool>>,
     Vec<(String, String)>,
@@ -8892,12 +9015,15 @@ async fn initialize_direct_workflow_mcp_pool(
     if !config.features().enabled(Feature::Mcp) {
         return None;
     }
-    let mut pool =
-        crate::mcp::McpPool::from_config_path_with_workspace(&config.mcp_config_path(), workspace)
-            .unwrap_or_else(|error| {
-                tracing::debug!("No MCP config for direct Workflow runtime: {error:#}");
-                crate::mcp::McpPool::new(crate::mcp::McpConfig::default())
-            });
+    let mut pool = crate::mcp::McpPool::from_config_path_with_workspace_and_plugins(
+        &config.mcp_config_path(),
+        workspace,
+        plugin_registry,
+    )
+    .unwrap_or_else(|error| {
+        tracing::debug!("No MCP config for direct Workflow runtime: {error:#}");
+        crate::mcp::McpPool::new(crate::mcp::McpConfig::default())
+    });
     if let Some(policy) = network_policy {
         pool = pool.with_network_policy(policy);
     }
@@ -8915,6 +9041,7 @@ async fn build_direct_workflow_tool(
     route: &CliAutoRoute,
     workspace: &Path,
     event_tx: tokio::sync::mpsc::Sender<crate::core::events::Event>,
+    plugin_registry: std::sync::Arc<crate::plugins::PluginRegistry>,
 ) -> Result<(
     crate::tools::workflow::WorkflowTool,
     crate::tools::ToolContext,
@@ -8962,6 +9089,7 @@ async fn build_direct_workflow_tool(
         config.skills_dir(),
         config.skills_config().scan_codewhale_only(),
     )
+    .with_plugin_registry(std::sync::Arc::clone(&plugin_registry))
     .with_shell_policy(shell_policy)
     .with_trusted_external_paths(trusted.paths().to_vec())
     .with_elevated_sandbox_policy(workflow_host_sandbox_policy(config, mode, workspace));
@@ -9019,7 +9147,8 @@ async fn build_direct_workflow_tool(
         .reasoning_effort
         .and_then(|effort| cli_reasoning_effort_value(config, effort));
     let mcp_pool = if let Some((pool, failures)) =
-        initialize_direct_workflow_mcp_pool(config, workspace, network_policy).await
+        initialize_direct_workflow_mcp_pool(config, workspace, network_policy, plugin_registry)
+            .await
     {
         for (server, error) in failures {
             tracing::warn!(
@@ -9383,6 +9512,7 @@ async fn run_exec_agent(
     allowed_tools: Option<Vec<String>>,
     disallowed_tools: Option<Vec<String>>,
     append_system_prompt: Option<String>,
+    plugin_registry: std::sync::Arc<crate::plugins::PluginRegistry>,
 ) -> Result<()> {
     use crate::compaction::CompactionConfig;
     use crate::core::engine::{EngineConfig, spawn_engine};
@@ -9473,7 +9603,7 @@ async fn run_exec_agent(
         model: effective_model.clone(),
         active_route_limits,
         workspace: workspace.clone(),
-        plugin_registry: Some(crate::plugins::registry_for_workspace(&workspace)),
+        plugin_registry: Some(plugin_registry),
         allow_shell: auto_approve || execution_config.allow_shell(),
         trust_mode,
         notes_path: execution_config.notes_path(),
@@ -11294,9 +11424,9 @@ mod terminal_mode_tests {
             ];
             args.extend(route.into_iter().map(str::to_string));
             let cli = Cli::try_parse_from(args).expect("route should parse");
-            let registry = crate::plugins::registry_for_workspace(
-                cli.workspace.as_deref().unwrap_or(workspace.as_path()),
-            );
+            let discovery = crate::plugins::PluginDiscoveryContext::capture_pre_dotenv();
+            let registry = discovery
+                .registry_for_workspace(cli.workspace.as_deref().unwrap_or(workspace.as_path()));
             assert_eq!(registry.workspace(), workspace.as_path());
             assert!(
                 !codewhale_home.join("plugins/state.json").exists(),
@@ -11460,8 +11590,9 @@ mod terminal_mode_tests {
             auto_model: false,
         };
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(64);
+        let plugins = Arc::new(crate::plugins::PluginRegistry::empty(workspace.path()));
         let (tool, context) =
-            build_direct_workflow_tool(&config, &route, workspace.path(), event_tx)
+            build_direct_workflow_tool(&config, &route, workspace.path(), event_tx, plugins)
                 .await
                 .expect("build direct workflow runtime");
 
@@ -11536,8 +11667,9 @@ mod terminal_mode_tests {
             None,
         );
 
+        let plugins = Arc::new(crate::plugins::PluginRegistry::empty(workspace.path()));
         let (_pool, failures) =
-            initialize_direct_workflow_mcp_pool(&config, workspace.path(), Some(policy))
+            initialize_direct_workflow_mcp_pool(&config, workspace.path(), Some(policy), plugins)
                 .await
                 .expect("MCP feature enabled");
         assert_eq!(failures.len(), 1, "failures={failures:?}");

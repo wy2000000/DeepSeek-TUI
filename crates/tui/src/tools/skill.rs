@@ -396,7 +396,8 @@ mod tests {
         .unwrap();
         fs::write(skill_dir.join("companion.txt"), "reviewed companion").unwrap();
 
-        let mut plugins = crate::plugins::registry_for_workspace(tmp.path());
+        let discovery = crate::plugins::PluginDiscoveryContext::capture_pre_dotenv();
+        let mut plugins = discovery.registry_for_workspace(tmp.path());
         std::sync::Arc::make_mut(&mut plugins)
             .trust("demo")
             .unwrap();

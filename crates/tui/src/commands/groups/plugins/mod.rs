@@ -66,7 +66,7 @@ fn plugins(app: &mut App, arg: Option<&str>) -> CommandResult {
         ["disable", selector] => mutate_bundle(app, selector, Mutation::Disable),
         ["revoke", selector] => mutate_bundle(app, selector, Mutation::Revoke),
         ["reload"] => {
-            app.plugin_registry = crate::plugins::registry_for_workspace(&app.workspace);
+            app.plugin_registry = app.plugin_registry.rediscover_for_workspace(&app.workspace);
             app.refresh_skill_cache();
             let count = app.plugin_registry.len();
             CommandResult::with_message_and_action(
@@ -439,30 +439,16 @@ fn render_mcp_inventory(plugin: &LoadedPlugin) -> String {
                     .as_deref()
                     .map(escape_review_text)
                     .unwrap_or_else(|| "none".to_string());
-                let oauth_client = server
-                    .oauth
-                    .as_ref()
-                    .and_then(|oauth| oauth.client_id.as_deref())
-                    .map(escape_review_text)
-                    .unwrap_or_else(|| "dynamic-registration/default".to_string());
-                let oauth_resource = server
-                    .oauth_resource
-                    .as_deref()
-                    .map(escape_review_text)
-                    .unwrap_or_else(|| "none".to_string());
                 let transport = server.transport.as_deref().unwrap_or(
                     "streamable-http with same-origin SSE fallback",
                 );
                 format!(
-                    "{}: transport={} endpoint={} redirects=same-origin-only env_headers=[{}] bearer_env={} oauth_scopes=[{}] oauth_client={} oauth_resource={} timeouts={} required={} enabled_tools=[{}] disabled_tools=[{}] {enabled}",
+                    "{}: transport={} endpoint={} redirects=same-origin-only env_headers=[{}] bearer_env={} oauth=disabled-v0.9.1 timeouts={} required={} enabled_tools=[{}] disabled_tools=[{}] {enabled}",
                     escape_review_text(name),
                     escape_review_text(transport),
                     endpoint,
                     if env_headers.is_empty() { "none".to_string() } else { env_headers.join(", ") },
                     bearer,
-                    render_review_values(&server.scopes),
-                    oauth_client,
-                    oauth_resource,
                     render_mcp_timeouts(server),
                     server.required,
                     render_review_values(&server.enabled_tools),
@@ -482,28 +468,27 @@ fn render_review_argv(plugin: &LoadedPlugin, arguments: &[String]) -> Vec<String
         .enumerate()
         .map(|(index, argument)| {
             let position = index + 1;
-            if argument.starts_with('-') {
-                let flag = argument
-                    .split_once('=')
-                    .map_or(argument.as_str(), |(flag, _)| flag);
-                let suffix = if argument.contains('=') {
-                    "=<redacted>"
-                } else {
-                    ""
-                };
-                return format!("#{position} flag={}{}", escape_review_text(flag), suffix);
-            }
             let candidate = plugin.canonical_root.join(argument);
             if candidate.exists()
                 && candidate
                     .canonicalize()
                     .is_ok_and(|path| path.starts_with(&plugin.canonical_root))
             {
-                return format!("#{position} plugin-path={}", escape_review_text(argument));
+                return format!(
+                    "#{position} plugin-path={}",
+                    render_review_argv_value(argument)
+                );
             }
-            format!("#{position} opaque=<redacted>")
+            format!("#{position} value={}", render_review_argv_value(argument))
         })
         .collect()
+}
+
+fn render_review_argv_value(value: &str) -> String {
+    // JSON string syntax is a lossless, unambiguous terminal representation:
+    // whitespace, quotes, backslashes, and punctuation retain their exact
+    // argv semantics without hiding arbitrary values behind redaction.
+    serde_json::to_string(value).expect("serializing a Rust string cannot fail")
 }
 
 fn render_review_values(values: &[String]) -> String {
@@ -793,7 +778,9 @@ mod tests {
             }),
             ..Default::default()
         };
-        let mut app = App::new(options, &config);
+        let discovery = crate::plugins::PluginDiscoveryContext::capture_pre_dotenv();
+        let registry = discovery.registry_for_workspace(root);
+        let mut app = App::new_with_plugin_registry(options, &config, registry);
         app.ui_locale = Locale::En;
         (app, temp)
     }
@@ -826,7 +813,7 @@ version = "1.0.0"
 
 [mcp_servers.local]
 command = "node"
-args = ["server.js", "--token", "must-not-be-rendered-from-args"]
+args = ["server.js", "--mode=worker", "-e", "console.log('ready')"]
 
 [mcp_servers.local.env]
 PLUGIN_TOKEN = "${PLUGIN_TOKEN_SOURCE}"
@@ -834,7 +821,6 @@ PLUGIN_TOKEN = "${PLUGIN_TOKEN_SOURCE}"
 [mcp_servers.remote]
 url = "https://example.invalid/mcp"
 bearer_token_env_var = "REMOTE_TOKEN"
-scopes = ["tools.read"]
 
 [mcp_servers.remote.env_headers]
 X_Api_Key = "REMOTE_API_KEY"
@@ -932,7 +918,10 @@ network_hosts = ["example.invalid"]
         assert!(review.contains("bearer_env=REMOTE\\_TOKEN"));
         assert!(review.contains("redirects=same-origin-only"));
         assert!(review.contains("Qualified skills: [none]"));
-        assert!(!review.contains("must-not-be-rendered"));
+        assert!(review.contains("#2 value=\"--mode=worker\""));
+        assert!(review.contains("#3 value=\"-e\""));
+        assert!(review.contains("#4 value=\"console.log('ready')\""));
+        assert!(review.contains("oauth=disabled-v0.9.1"));
     }
 
     #[test]

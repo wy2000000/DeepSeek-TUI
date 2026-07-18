@@ -716,6 +716,7 @@ async fn spawn_test_server_with_root_token_mobile_workspace_and_overrides(
     let state = RuntimeApiState {
         config: Arc::new(parking_lot::RwLock::new(config)),
         workspace,
+        plugin_discovery: crate::plugins::PluginDiscoveryContext::capture_pre_dotenv(),
         task_manager: manager,
         runtime_threads: runtime_threads.clone(),
         cors_origins: Vec::new(),

@@ -5,7 +5,7 @@
 //! - Automatic tool discovery via `tools/list`
 //! - Configurable timeouts per-server and globally
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::future::Future;
@@ -60,7 +60,10 @@ fn validate_mcp_config_path(path: &Path) -> Result<()> {
 /// On a missing or malformed placeholder the error names only the offending
 /// variable, never the surrounding value, so a secret-bearing string is never
 /// echoed into logs or error output.
-fn expand_env_placeholders(value: &str) -> Result<String> {
+fn expand_env_placeholders_with(
+    value: &str,
+    environment: Option<&crate::plugins::HostEnvironment>,
+) -> Result<String> {
     let mut out = String::new();
     let mut rest = value;
     while let Some(start) = rest.find("${") {
@@ -73,9 +76,11 @@ fn expand_env_placeholders(value: &str) -> Result<String> {
         if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
             anyhow::bail!("invalid environment placeholder in MCP config value");
         }
-        let env_value = std::env::var(name).with_context(|| {
-            format!("environment variable {name} required by MCP config is not set")
-        })?;
+        let env_value = environment
+            .map_or_else(|| std::env::var(name), |env| env.var(name))
+            .with_context(|| {
+                format!("environment variable {name} required by MCP config is not set")
+            })?;
         out.push_str(&env_value);
         rest = &after[end + 1..];
     }
@@ -83,26 +88,44 @@ fn expand_env_placeholders(value: &str) -> Result<String> {
     Ok(out)
 }
 
+#[cfg(test)]
+fn expand_env_placeholders(value: &str) -> Result<String> {
+    expand_env_placeholders_with(value, None)
+}
+
 /// Expand `${NAME}` placeholders across every value of an MCP config map
 /// (e.g. the stdio child `env`). `context` only labels expansion errors so a
 /// failure can be attributed to the right map.
-fn expand_env_placeholders_map(
+fn expand_env_placeholders_map_with_environment(
     values: &HashMap<String, String>,
     context: &str,
+    environment: Option<&crate::plugins::HostEnvironment>,
 ) -> Result<HashMap<String, String>> {
     let mut expanded = HashMap::with_capacity(values.len());
     for (key, value) in values {
         expanded.insert(
             key.clone(),
-            expand_env_placeholders(value)
+            expand_env_placeholders_with(value, environment)
                 .with_context(|| format!("failed to expand MCP {context} value for {key}"))?,
         );
     }
     Ok(expanded)
 }
 
+#[cfg(test)]
+fn expand_env_placeholders_map(
+    values: &HashMap<String, String>,
+    context: &str,
+) -> Result<HashMap<String, String>> {
+    expand_env_placeholders_map_with_environment(values, context, None)
+}
+
 fn expanded_mcp_stdio_env(config: &McpServerConfig) -> Result<HashMap<String, String>> {
-    expand_env_placeholders_map(&config.env, "env")
+    let environment = config
+        .reviewed_plugin
+        .as_ref()
+        .map(|source| source.host_environment.as_ref());
+    expand_env_placeholders_map_with_environment(&config.env, "env", environment)
 }
 
 /// Mirror the exact expanded and sanitized environment applied by the MCP
@@ -110,11 +133,14 @@ fn expanded_mcp_stdio_env(config: &McpServerConfig) -> Result<HashMap<String, St
 fn mcp_stdio_child_env(config: &McpServerConfig) -> Result<Vec<(OsString, OsString)>> {
     let expanded_env = expanded_mcp_stdio_env(config)?;
     let overrides = crate::child_env::string_map_env(&expanded_env);
-    Ok(if config.reviewed_plugin.is_some() {
+    Ok(if let Some(source) = config.reviewed_plugin.as_ref() {
         // Plugin reviews name every extra environment source explicitly. Do
         // not silently widen that consent to the compatibility-oriented MCP
         // bootstrap namespace (for example NPM_CONFIG_*).
-        crate::child_env::sanitized_plugin_mcp_env(overrides)
+        crate::child_env::sanitized_plugin_mcp_env_from(
+            source.host_environment.entries().iter().cloned(),
+            overrides,
+        )
     } else {
         crate::child_env::sanitized_mcp_env(overrides)
     })
@@ -588,12 +614,14 @@ pub(crate) struct ReviewedPluginMcpSource {
     authority: crate::plugins::types::PluginAuthority,
     approved_remote_endpoint: Option<String>,
     approved_remote_origin: Option<String>,
+    host_environment: Arc<crate::plugins::HostEnvironment>,
 }
 
 impl ReviewedPluginMcpSource {
     fn from_authority(
         authority: crate::plugins::types::PluginAuthority,
         remote_endpoint: Option<&str>,
+        host_environment: Arc<crate::plugins::HostEnvironment>,
     ) -> Result<Self> {
         let (approved_remote_endpoint, approved_remote_origin) = match remote_endpoint {
             Some(endpoint) => reviewed_remote_endpoint_identity(endpoint)
@@ -604,6 +632,7 @@ impl ReviewedPluginMcpSource {
             authority,
             approved_remote_endpoint,
             approved_remote_origin,
+            host_environment,
         })
     }
 
@@ -901,21 +930,29 @@ enum HttpTransportMode {
 
 #[derive(Clone, Default)]
 struct McpHttpAuth {
+    server_name: String,
     headers: HashMap<String, String>,
     env_headers: HashMap<String, String>,
     bearer_token_env_var: Option<String>,
     oauth: Option<oauth::McpOAuthRuntime>,
     suppress_server_error_details: bool,
+    reviewed_plugin: Option<ReviewedPluginMcpSource>,
 }
 
 impl McpHttpAuth {
-    fn from_config(config: &McpServerConfig, oauth: Option<oauth::McpOAuthRuntime>) -> Self {
+    fn from_config(
+        server_name: &str,
+        config: &McpServerConfig,
+        oauth: Option<oauth::McpOAuthRuntime>,
+    ) -> Self {
         Self {
+            server_name: server_name.to_string(),
             headers: config.headers.clone(),
             env_headers: config.env_headers.clone(),
             bearer_token_env_var: config.bearer_token_env_var.clone(),
             oauth,
             suppress_server_error_details: config.reviewed_plugin.is_some(),
+            reviewed_plugin: config.reviewed_plugin.clone(),
         }
     }
 
@@ -928,9 +965,16 @@ impl McpHttpAuth {
     }
 
     async fn resolved_headers(&self) -> Result<HashMap<String, String>> {
+        if let Some(source) = self.reviewed_plugin.as_ref() {
+            source.validate_before_use(&self.server_name, "authenticate request to")?;
+        }
         let mut headers = self.headers.clone();
         for (name, env_var) in &self.env_headers {
-            if let Ok(value) = std::env::var(env_var)
+            let value = self.reviewed_plugin.as_ref().map_or_else(
+                || std::env::var(env_var),
+                |source| source.host_environment.var(env_var),
+            );
+            if let Ok(value) = value
                 && !value.trim().is_empty()
             {
                 headers.insert(name.clone(), value);
@@ -938,7 +982,10 @@ impl McpHttpAuth {
         }
         if !mcp_headers_have_authorization(&headers)
             && let Some(env_var) = self.bearer_token_env_var.as_deref()
-            && let Ok(token) = std::env::var(env_var)
+            && let Ok(token) = self.reviewed_plugin.as_ref().map_or_else(
+                || std::env::var(env_var),
+                |source| source.host_environment.var(env_var),
+            )
         {
             let token = token.trim();
             if !token.is_empty() {
@@ -1221,6 +1268,70 @@ pub(super) const MAX_SSE_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// newline-free multi-GB "line") and OOM the process at transport-read time,
 /// before any transcript-level spillover applies.
 pub(super) const MAX_MCP_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_MCP_CATALOG_PAGES: usize = 64;
+const MAX_MCP_CATALOG_ITEMS: usize = 4_096;
+const MAX_MCP_CATALOG_BYTES: usize = 32 * 1024 * 1024;
+
+struct McpCatalogBudget {
+    method: &'static str,
+    pages: usize,
+    items: usize,
+    bytes: usize,
+    seen_cursors: HashSet<String>,
+}
+
+impl McpCatalogBudget {
+    fn new(method: &'static str) -> Self {
+        Self {
+            method,
+            pages: 0,
+            items: 0,
+            bytes: 0,
+            seen_cursors: HashSet::new(),
+        }
+    }
+
+    fn observe_page(
+        &mut self,
+        result: &serde_json::Value,
+        item_count: usize,
+    ) -> Result<Option<String>> {
+        self.pages = self.pages.saturating_add(1);
+        self.items = self.items.saturating_add(item_count);
+        self.bytes = self.bytes.saturating_add(serde_json::to_vec(result)?.len());
+        if self.pages > MAX_MCP_CATALOG_PAGES {
+            anyhow::bail!(
+                "{} exceeded the {}-page catalogue limit",
+                self.method,
+                MAX_MCP_CATALOG_PAGES
+            );
+        }
+        if self.items > MAX_MCP_CATALOG_ITEMS {
+            anyhow::bail!(
+                "{} exceeded the {}-item catalogue limit",
+                self.method,
+                MAX_MCP_CATALOG_ITEMS
+            );
+        }
+        if self.bytes > MAX_MCP_CATALOG_BYTES {
+            anyhow::bail!(
+                "{} exceeded the {}-byte aggregate catalogue limit",
+                self.method,
+                MAX_MCP_CATALOG_BYTES
+            );
+        }
+        let cursor = result
+            .get("nextCursor")
+            .and_then(|value| value.as_str())
+            .map(str::to_owned);
+        if let Some(cursor) = cursor.as_ref()
+            && !self.seen_cursors.insert(cursor.clone())
+        {
+            anyhow::bail!("{} repeated pagination cursor; aborting", self.method);
+        }
+        Ok(cursor)
+    }
+}
 
 fn sse_field_value<'a>(line: &'a str, field: &str) -> Option<&'a str> {
     let value = line.strip_prefix(field)?;
@@ -1420,16 +1531,26 @@ impl McpConnection {
                         }
                     }));
             }
-            let env_proxy_url = std::env::var("HTTPS_PROXY")
-                .or_else(|_| std::env::var("https_proxy"))
-                .or_else(|_| std::env::var("HTTP_PROXY"))
-                .or_else(|_| std::env::var("http_proxy"))
+            let environment = config
+                .reviewed_plugin
+                .as_ref()
+                .map(|source| source.host_environment.as_ref());
+            let read_environment =
+                |name: &str| environment.map_or_else(|| std::env::var(name), |env| env.var(name));
+            let env_proxy_url = read_environment("HTTPS_PROXY")
+                .or_else(|_| read_environment("https_proxy"))
+                .or_else(|_| read_environment("HTTP_PROXY"))
+                .or_else(|_| read_environment("http_proxy"))
                 .ok()
                 .filter(|s| !s.trim().is_empty());
             if let Some(proxy_url) = env_proxy_url {
                 match reqwest::Proxy::all(&proxy_url) {
                     Ok(proxy) => {
-                        let proxy = proxy.no_proxy(reqwest::NoProxy::from_env());
+                        let no_proxy = read_environment("NO_PROXY")
+                            .or_else(|_| read_environment("no_proxy"))
+                            .ok()
+                            .and_then(|value| reqwest::NoProxy::from_string(&value));
+                        let proxy = proxy.no_proxy(no_proxy);
                         client_builder = client_builder.proxy(proxy);
                     }
                     Err(err) => {
@@ -1449,64 +1570,65 @@ impl McpConnection {
                 }
             }
             let client = client_builder.build()?;
-            let oauth_runtime = match oauth::build_default_headers(
-                &config.headers,
-                &config.env_headers,
-            ) {
-                Ok(default_headers) => {
-                    let prepared = tokio::select! {
-                        biased;
-                        _ = cancel_token.cancelled() => {
-                            anyhow::bail!(
-                                "MCP OAuth setup cancelled after plugin authority changed"
-                            )
-                        }
-                        prepared = oauth::McpOAuthRuntime::from_server_config(
-                            &name,
-                            &config,
-                            default_headers,
-                        ) => prepared,
-                    };
-                    match prepared {
-                        Ok(runtime) => runtime,
-                        Err(err) => {
-                            if config.reviewed_plugin.is_some() {
-                                tracing::warn!(
-                                    target: "mcp",
-                                    server = %name,
-                                    "failed to prepare reviewed plugin MCP OAuth runtime; provider details suppressed; continuing without stored OAuth token"
-                                );
-                            } else {
-                                tracing::warn!(
-                                    target: "mcp",
-                                    server = %name,
-                                    error = %err,
-                                    "failed to prepare MCP OAuth runtime; continuing without stored OAuth token"
-                                );
+            let oauth_runtime = if config.reviewed_plugin.is_some() {
+                None
+            } else {
+                match oauth::build_default_headers(&config.headers, &config.env_headers) {
+                    Ok(default_headers) => {
+                        let prepared = tokio::select! {
+                            biased;
+                            _ = cancel_token.cancelled() => {
+                                anyhow::bail!(
+                                    "MCP OAuth setup cancelled after plugin authority changed"
+                                )
                             }
-                            None
+                            prepared = oauth::McpOAuthRuntime::from_server_config(
+                                &name,
+                                &config,
+                                default_headers,
+                            ) => prepared,
+                        };
+                        match prepared {
+                            Ok(runtime) => runtime,
+                            Err(err) => {
+                                if config.reviewed_plugin.is_some() {
+                                    tracing::warn!(
+                                        target: "mcp",
+                                        server = %name,
+                                        "failed to prepare reviewed plugin MCP OAuth runtime; provider details suppressed; continuing without stored OAuth token"
+                                    );
+                                } else {
+                                    tracing::warn!(
+                                        target: "mcp",
+                                        server = %name,
+                                        error = %err,
+                                        "failed to prepare MCP OAuth runtime; continuing without stored OAuth token"
+                                    );
+                                }
+                                None
+                            }
                         }
                     }
-                }
-                Err(err) => {
-                    if config.reviewed_plugin.is_some() {
-                        tracing::warn!(
-                            target: "mcp",
-                            server = %name,
-                            "failed to prepare reviewed plugin MCP OAuth headers; details suppressed; continuing without stored OAuth token"
-                        );
-                    } else {
-                        tracing::warn!(
-                            target: "mcp",
-                            server = %name,
-                            error = %err,
-                            "failed to prepare MCP OAuth default headers; continuing without stored OAuth token"
-                        );
+                    Err(err) => {
+                        if config.reviewed_plugin.is_some() {
+                            tracing::warn!(
+                                target: "mcp",
+                                server = %name,
+                                "failed to prepare reviewed plugin MCP OAuth headers; details suppressed; continuing without stored OAuth token"
+                            );
+                        } else {
+                            tracing::warn!(
+                                target: "mcp",
+                                server = %name,
+                                error = %err,
+                                "failed to prepare MCP OAuth default headers; continuing without stored OAuth token"
+                            );
+                        }
+                        None
                     }
-                    None
                 }
             };
-            let http_auth = McpHttpAuth::from_config(&config, oauth_runtime);
+            let http_auth = McpHttpAuth::from_config(&name, &config, oauth_runtime);
             if is_legacy_sse_transport(&config) {
                 Box::new(
                     SseTransport::connect(
@@ -1687,6 +1809,8 @@ impl McpConnection {
     /// Discover available tools from the MCP server
     async fn discover_tools(&mut self) -> Result<()> {
         let mut cursor: Option<String> = None;
+        let mut budget = McpCatalogBudget::new("tools/list");
+        let mut discovered = Vec::new();
         loop {
             let list_id = self.next_id();
             let params = match &cursor {
@@ -1711,10 +1835,14 @@ impl McpConnection {
                 break;
             };
 
+            let items = result
+                .get("tools")
+                .and_then(|tools| tools.as_array())
+                .map_or(0, Vec::len);
             if let Some(arr) = result.get("tools").and_then(|t| t.as_array()) {
                 for item in arr {
                     match serde_json::from_value::<McpTool>(item.clone()) {
-                        Ok(tool) => self.tools.push(tool),
+                        Ok(tool) => discovered.push(tool),
                         Err(err) => {
                             // Skip individual malformed entries instead of
                             // dropping the whole page (#1410). The old
@@ -1726,10 +1854,7 @@ impl McpConnection {
                 }
             }
 
-            cursor = result
-                .get("nextCursor")
-                .and_then(|v| v.as_str())
-                .map(str::to_owned);
+            cursor = budget.observe_page(result, items)?;
             if cursor.is_none() {
                 break;
             }
@@ -1737,13 +1862,16 @@ impl McpConnection {
         // Sort by tool name so the order the model sees doesn't depend on
         // server-side pagination ordering — keeps the prompt prefix stable
         // for cache-hit purposes (#1319).
-        self.tools.sort_by(|a, b| a.name.cmp(&b.name));
+        discovered.sort_by(|a, b| a.name.cmp(&b.name));
+        self.tools = discovered;
         Ok(())
     }
 
     /// Discover available resources from the MCP server
     async fn discover_resources(&mut self) -> Result<()> {
         let mut cursor: Option<String> = None;
+        let mut budget = McpCatalogBudget::new("resources/list");
+        let mut discovered = Vec::new();
         loop {
             let list_id = self.next_id();
             let params = match &cursor {
@@ -1768,10 +1896,14 @@ impl McpConnection {
                 break;
             };
 
+            let items = result
+                .get("resources")
+                .and_then(|resources| resources.as_array())
+                .map_or(0, Vec::len);
             if let Some(arr) = result.get("resources").and_then(|r| r.as_array()) {
                 for item in arr {
                     match serde_json::from_value::<McpResource>(item.clone()) {
-                        Ok(resource) => self.resources.push(resource),
+                        Ok(resource) => discovered.push(resource),
                         Err(err) => {
                             tracing::debug!(target: "mcp", ?err, "skipping malformed resource item");
                         }
@@ -1779,20 +1911,20 @@ impl McpConnection {
                 }
             }
 
-            cursor = result
-                .get("nextCursor")
-                .and_then(|v| v.as_str())
-                .map(str::to_owned);
+            cursor = budget.observe_page(result, items)?;
             if cursor.is_none() {
                 break;
             }
         }
+        self.resources = discovered;
         Ok(())
     }
 
     /// Discover available resource templates from the MCP server
     async fn discover_resource_templates(&mut self) -> Result<()> {
         let mut cursor: Option<String> = None;
+        let mut budget = McpCatalogBudget::new("resources/templates/list");
+        let mut discovered = Vec::new();
         loop {
             let list_id = self.next_id();
             let params = match &cursor {
@@ -1821,10 +1953,13 @@ impl McpConnection {
                 .get("resourceTemplates")
                 .or_else(|| result.get("templates"))
                 .or_else(|| result.get("resource_templates"));
+            let items = templates
+                .and_then(|templates| templates.as_array())
+                .map_or(0, Vec::len);
             if let Some(arr) = templates.and_then(|t| t.as_array()) {
                 for item in arr {
                     match serde_json::from_value::<McpResourceTemplate>(item.clone()) {
-                        Ok(tmpl) => self.resource_templates.push(tmpl),
+                        Ok(tmpl) => discovered.push(tmpl),
                         Err(err) => {
                             tracing::debug!(target: "mcp", ?err, "skipping malformed resource_template item");
                         }
@@ -1832,20 +1967,20 @@ impl McpConnection {
                 }
             }
 
-            cursor = result
-                .get("nextCursor")
-                .and_then(|v| v.as_str())
-                .map(str::to_owned);
+            cursor = budget.observe_page(result, items)?;
             if cursor.is_none() {
                 break;
             }
         }
+        self.resource_templates = discovered;
         Ok(())
     }
 
     /// Discover available prompts from the MCP server
     async fn discover_prompts(&mut self) -> Result<()> {
         let mut cursor: Option<String> = None;
+        let mut budget = McpCatalogBudget::new("prompts/list");
+        let mut discovered = Vec::new();
         loop {
             let list_id = self.next_id();
             let params = match &cursor {
@@ -1870,10 +2005,14 @@ impl McpConnection {
                 break;
             };
 
+            let items = result
+                .get("prompts")
+                .and_then(|prompts| prompts.as_array())
+                .map_or(0, Vec::len);
             if let Some(arr) = result.get("prompts").and_then(|p| p.as_array()) {
                 for item in arr {
                     match serde_json::from_value::<McpPrompt>(item.clone()) {
-                        Ok(prompt) => self.prompts.push(prompt),
+                        Ok(prompt) => discovered.push(prompt),
                         Err(err) => {
                             tracing::debug!(target: "mcp", ?err, "skipping malformed prompt item");
                         }
@@ -1881,14 +2020,12 @@ impl McpConnection {
                 }
             }
 
-            cursor = result
-                .get("nextCursor")
-                .and_then(|v| v.as_str())
-                .map(str::to_owned);
+            cursor = budget.observe_page(result, items)?;
             if cursor.is_none() {
                 break;
             }
         }
+        self.prompts = discovered;
         Ok(())
     }
 
@@ -2224,11 +2361,12 @@ impl McpPool {
     /// Create a pool from global MCP config plus workspace-local
     /// `.codewhale/mcp.json`. Project servers override same-name global
     /// servers and default stdio `cwd` to the workspace root.
+    #[cfg(test)]
     pub fn from_config_path_with_workspace(
         path: &std::path::Path,
         workspace: &Path,
     ) -> Result<Self> {
-        let plugins = crate::plugins::registry_for_workspace(workspace);
+        let plugins = Arc::new(crate::plugins::PluginRegistry::empty(workspace));
         Self::from_config_path_with_workspace_and_plugins(path, workspace, plugins)
     }
 
@@ -2450,7 +2588,8 @@ impl McpPool {
 
     /// Get all discovered tools with server-prefixed names
     pub fn all_tools(&self) -> Vec<(String, &McpTool)> {
-        let mut tools = Vec::new();
+        let mut by_name: std::collections::BTreeMap<String, Option<&McpTool>> =
+            std::collections::BTreeMap::new();
         for (server, conn) in &self.connections {
             if !conn.catalog_authorized() {
                 continue;
@@ -2460,13 +2599,26 @@ impl McpPool {
                     continue;
                 }
                 // Format: mcp_{server}_{tool}
-                tools.push((format!("mcp_{}_{}", server, tool.name), tool));
+                let name = format!("mcp_{}_{}", server, tool.name);
+                match by_name.entry(name.clone()) {
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(Some(tool));
+                    }
+                    std::collections::btree_map::Entry::Occupied(mut entry) => {
+                        tracing::warn!(
+                            target: "mcp",
+                            model_tool = %name,
+                            "hiding ambiguous MCP model tool name"
+                        );
+                        entry.insert(None);
+                    }
+                }
             }
         }
-        // Sort by prefixed name so iteration order across servers is
-        // deterministic for prefix-cache stability (#1319).
-        tools.sort_by(|a, b| a.0.cmp(&b.0));
-        tools
+        by_name
+            .into_iter()
+            .filter_map(|(name, tool)| tool.map(|tool| (name, tool)))
+            .collect()
     }
 
     /// Get all discovered resources with server-prefixed names
@@ -2644,38 +2796,66 @@ impl McpPool {
     }
 
     /// Parse a prefixed name into (server_name, tool_name)
-    pub(crate) fn parse_prefixed_name<'a>(
-        &self,
-        prefixed_name: &'a str,
-    ) -> Result<(&'a str, &'a str)> {
+    pub(crate) fn parse_prefixed_name(&self, prefixed_name: &str) -> Result<(String, String)> {
         let Some(rest) = prefixed_name.strip_prefix("mcp_") else {
             anyhow::bail!("Invalid MCP tool name: {prefixed_name}");
         };
 
-        let mut best_match: Option<(&str, &str)> = None;
-        for server in self.connections.keys().chain(self.config.servers.keys()) {
+        let mut matched: Option<(String, String)> = None;
+        for (server, connection) in &self.connections {
+            if !connection.catalog_authorized() {
+                continue;
+            }
+            for tool in connection.tools() {
+                if !connection.config().is_tool_enabled(&tool.name)
+                    || format!("{server}_{}", tool.name) != rest
+                {
+                    continue;
+                }
+                if matched.is_some() {
+                    anyhow::bail!(
+                        "Ambiguous MCP tool name '{prefixed_name}' matches more than one server/tool authority"
+                    );
+                }
+                matched = Some((server.clone(), tool.name.clone()));
+            }
+        }
+        if let Some(matched) = matched {
+            return Ok(matched);
+        }
+
+        // Preserve lazy connection for a uniquely named configured server.
+        // Never use the former "longest prefix wins" heuristic: two server
+        // names can encode the same model-visible name and silently redirect
+        // authority (for example `my` + `db_read` vs `my_db` + `read`).
+        let dynamic_servers = self.dynamic_servers.read();
+        let configured_servers = self
+            .config
+            .servers
+            .iter()
+            .filter_map(|(name, config)| config.is_enabled().then_some(name.as_str()))
+            .chain(
+                dynamic_servers
+                    .iter()
+                    .filter_map(|(name, config)| config.is_enabled().then_some(name.as_str())),
+            );
+        let mut configured_match: Option<(String, String)> = None;
+        for server in configured_servers {
             let Some(tool) = rest
                 .strip_prefix(server)
-                .and_then(|tail| tail.strip_prefix('_'))
+                .and_then(|suffix| suffix.strip_prefix('_'))
+                .filter(|tool| !tool.is_empty())
             else {
                 continue;
             };
-            if tool.is_empty() {
-                continue;
+            if configured_match.is_some() {
+                anyhow::bail!(
+                    "Ambiguous MCP tool name '{prefixed_name}' matches more than one configured server authority"
+                );
             }
-            if best_match.is_none_or(|(matched, _)| server.len() > matched.len()) {
-                best_match = Some((&rest[..server.len()], tool));
-            }
+            configured_match = Some((server.to_string(), tool.to_string()));
         }
-
-        if let Some((server, tool)) = best_match {
-            return Ok((server, tool));
-        }
-
-        let Some((server, tool)) = rest.split_once('_') else {
-            anyhow::bail!("Invalid MCP tool name format: {prefixed_name}");
-        };
-        Ok((server, tool))
+        configured_match.ok_or_else(|| anyhow::anyhow!("Unknown MCP tool name: {prefixed_name}"))
     }
 
     /// Convert discovered tools to API Tool format
@@ -2882,12 +3062,12 @@ impl McpPool {
         let (server_name, tool_name) = self.parse_prefixed_name(prefixed_name)?;
         // Copy the global timeouts to avoid borrow conflict
         let global_timeouts = self.config.timeouts;
-        let conn = self.get_or_connect(server_name).await?;
-        if !conn.config().is_tool_enabled(tool_name) {
+        let conn = self.get_or_connect(&server_name).await?;
+        if !conn.config().is_tool_enabled(&tool_name) {
             anyhow::bail!("MCP tool '{tool_name}' is disabled for server '{server_name}'");
         }
         let timeout = conn.config().effective_execute_timeout(&global_timeouts);
-        match conn.call_tool(tool_name, arguments.clone(), timeout).await {
+        match conn.call_tool(&tool_name, arguments.clone(), timeout).await {
             Ok(result) => Ok(result),
             Err(err) if is_mcp_stale_session_error(&err) => {
                 tracing::debug!(
@@ -2897,13 +3077,13 @@ impl McpPool {
                     error = %err,
                     "retrying MCP tool call after stale session"
                 );
-                self.drop_connection(server_name, "stale session retry");
-                let conn = self.get_or_connect(server_name).await?;
-                if !conn.config().is_tool_enabled(tool_name) {
+                self.drop_connection(&server_name, "stale session retry");
+                let conn = self.get_or_connect(&server_name).await?;
+                if !conn.config().is_tool_enabled(&tool_name) {
                     anyhow::bail!("MCP tool '{tool_name}' is disabled for server '{server_name}'");
                 }
                 let timeout = conn.config().effective_execute_timeout(&global_timeouts);
-                conn.call_tool(tool_name, arguments, timeout).await
+                conn.call_tool(&tool_name, arguments, timeout).await
             }
             Err(err) => Err(err),
         }
@@ -3100,8 +3280,8 @@ pub fn workspace_mcp_config_path(workspace: &Path) -> PathBuf {
 }
 
 pub fn load_config_with_workspace(global_path: &Path, workspace: &Path) -> Result<McpConfig> {
-    let plugins = crate::plugins::registry_for_workspace(workspace);
-    load_config_with_workspace_and_plugins(global_path, workspace, plugins.as_ref())
+    let plugins = crate::plugins::PluginRegistry::empty(workspace);
+    load_config_with_workspace_and_plugins(global_path, workspace, &plugins)
 }
 
 pub fn load_config_with_workspace_and_plugins(
@@ -3152,10 +3332,13 @@ fn merge_plugin_mcp_servers(
         })
         .collect::<Vec<_>>();
 
-    merge_plugin_mcp_servers_from_plugins(config, plugins)
+    let host_environment = registry.host_environment().ok_or_else(|| {
+        anyhow::anyhow!("active plugin registry is missing its pre-dotenv environment snapshot")
+    })?;
+    merge_plugin_mcp_servers_from_plugins_with_environment(config, plugins, host_environment)
 }
 
-fn merge_plugin_mcp_servers_from_plugins(
+fn merge_plugin_mcp_servers_from_plugins_with_environment(
     mut config: McpConfig,
     plugins: impl IntoIterator<
         Item = (
@@ -3164,6 +3347,7 @@ fn merge_plugin_mcp_servers_from_plugins(
             crate::plugins::types::PluginAuthority,
         ),
     >,
+    host_environment: Arc<crate::plugins::HostEnvironment>,
 ) -> Result<McpConfig> {
     for (plugin_name, plugin, authority) in plugins {
         // Adapter-level denial keeps headless paths fail-closed even if a
@@ -3184,7 +3368,7 @@ fn merge_plugin_mcp_servers_from_plugins(
             let mut mcp_servers = mcp_servers.iter().collect::<Vec<_>>();
             mcp_servers.sort_by_key(|(name, _)| *name);
             for (server_name, server_config) in mcp_servers {
-                let qualified_name = format!("{}-{}", plugin_name, server_name);
+                let qualified_name = qualified_plugin_server_name(&plugin_name, server_name);
                 if config.servers.contains_key(&qualified_name) {
                     tracing::warn!(
                         target: "mcp",
@@ -3211,6 +3395,7 @@ fn merge_plugin_mcp_servers_from_plugins(
                 server_config.reviewed_plugin = Some(ReviewedPluginMcpSource::from_authority(
                     authority.clone(),
                     server_config.url.as_deref(),
+                    Arc::clone(&host_environment),
                 )?);
 
                 config.servers.insert(qualified_name, server_config);
@@ -3219,6 +3404,33 @@ fn merge_plugin_mcp_servers_from_plugins(
     }
 
     Ok(config)
+}
+
+#[cfg(test)]
+fn merge_plugin_mcp_servers_from_plugins(
+    config: McpConfig,
+    plugins: impl IntoIterator<
+        Item = (
+            String,
+            crate::plugins::types::LoadedPlugin,
+            crate::plugins::types::PluginAuthority,
+        ),
+    >,
+) -> Result<McpConfig> {
+    merge_plugin_mcp_servers_from_plugins_with_environment(
+        config,
+        plugins,
+        Arc::new(crate::plugins::HostEnvironment::capture()),
+    )
+}
+
+fn qualified_plugin_server_name(plugin_name: &str, server_name: &str) -> String {
+    format!(
+        "plugin-{}-{}-{}",
+        plugin_name.len(),
+        plugin_name,
+        server_name
+    )
 }
 
 fn freeze_plugin_stdio_paths(config: &mut McpServerConfig, staged_root: &Path) -> Result<()> {
@@ -3556,12 +3768,28 @@ pub fn manager_snapshot_from_config(
     ))
 }
 
+#[cfg(test)]
 pub fn manager_snapshot_from_config_with_workspace(
     path: &Path,
     workspace: &Path,
     restart_required: bool,
 ) -> Result<McpManagerSnapshot> {
-    let cfg = load_config_with_workspace(path, workspace)?;
+    let plugins = crate::plugins::PluginRegistry::empty(workspace);
+    manager_snapshot_from_config_with_workspace_and_plugins(
+        path,
+        workspace,
+        restart_required,
+        &plugins,
+    )
+}
+
+pub fn manager_snapshot_from_config_with_workspace_and_plugins(
+    path: &Path,
+    workspace: &Path,
+    restart_required: bool,
+    plugins: &crate::plugins::PluginRegistry,
+) -> Result<McpManagerSnapshot> {
+    let cfg = load_config_with_workspace_and_plugins(path, workspace, plugins)?;
     Ok(snapshot_from_config(
         path,
         path.exists(),
@@ -3597,14 +3825,17 @@ pub async fn discover_manager_snapshot(
     ))
 }
 
-pub async fn discover_manager_snapshot_with_workspace(
+pub async fn discover_manager_snapshot_with_workspace_and_plugins(
     path: &Path,
     workspace: &Path,
     network_policy: Option<NetworkPolicyDecider>,
     restart_required: bool,
+    plugins: Arc<crate::plugins::PluginRegistry>,
 ) -> Result<McpManagerSnapshot> {
-    let cfg = load_config_with_workspace(path, workspace)?;
+    let cfg = load_config_with_workspace_and_plugins(path, workspace, plugins.as_ref())?;
     let mut pool = McpPool::new(cfg.clone());
+    pool.workspace = Some(checked_workspace_path(workspace)?);
+    pool.plugin_registry = Some(plugins);
     if let Some(policy) = network_policy {
         pool = pool.with_network_policy(policy);
     }

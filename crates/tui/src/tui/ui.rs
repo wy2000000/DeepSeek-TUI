@@ -85,7 +85,7 @@ use crate::tools::subagent::{MailboxMessage, SubAgentStatus};
 use crate::tui::auto_router;
 use crate::tui::color_compat::ColorCompatBackend;
 use crate::tui::command_palette::{
-    CommandPaletteView, build_entries as build_command_palette_entries,
+    CommandPaletteView, build_entries_with_plugins as build_command_palette_entries,
 };
 use crate::tui::composer_ui::*;
 use crate::tui::context_inspector::ContextInspectorView;
@@ -818,7 +818,11 @@ fn surface_prompt_override_notices(app: &mut App) {
 /// crate::tui::run_tui(config, options).await
 /// # }
 /// ```
-pub async fn run_tui(config: &Config, options: TuiOptions) -> Result<()> {
+pub async fn run_tui(
+    config: &Config,
+    options: TuiOptions,
+    plugin_registry: std::sync::Arc<crate::plugins::PluginRegistry>,
+) -> Result<()> {
     let use_alt_screen = options.use_alt_screen;
     let use_mouse_capture = options.use_mouse_capture;
     let use_bracketed_paste = options.use_bracketed_paste;
@@ -976,7 +980,7 @@ pub async fn run_tui(config: &Config, options: TuiOptions) -> Result<()> {
     // can rebuild the API client without restarting the process.
     let mut config = config.clone();
     let config = &mut config;
-    let mut app = App::new(options.clone(), config);
+    let mut app = App::new_with_plugin_registry(options.clone(), config, plugin_registry);
     crate::startup_trace::mark("app_constructed");
     sync_config_provider_from_app(config, &app);
     surface_prompt_override_notices(&mut app);
@@ -1079,6 +1083,7 @@ pub async fn run_tui(config: &Config, options: TuiOptions) -> Result<()> {
             Some(app.max_subagents.clamp(1, 4)),
         ),
         config.clone(),
+        std::sync::Arc::clone(&app.plugin_registry),
     )
     .await?;
     let automations = std::sync::Arc::new(tokio::sync::Mutex::new(
@@ -4824,6 +4829,7 @@ async fn run_event_loop(
                         &app.workspace,
                         &app.mcp_config_path,
                         app.mcp_snapshot.as_ref(),
+                        app.plugin_registry.as_ref(),
                     ),
                 ));
                 continue;
@@ -9944,7 +9950,7 @@ fn spawn_external_url_command(mut command: Command) -> Result<()> {
 
 fn apply_workspace_runtime_state(app: &mut App, config: &Config, workspace: PathBuf) {
     app.workspace = workspace.clone();
-    app.plugin_registry = crate::plugins::registry_for_workspace(&workspace);
+    app.plugin_registry = app.plugin_registry.rediscover_for_workspace(&workspace);
     app.active_skill = None;
     app.active_skill_provenance = None;
     app.hooks = HookExecutor::new(
@@ -10088,7 +10094,11 @@ async fn handle_mcp_ui_action(
         }
         crate::tui::app::McpUiAction::Login { name, scopes } => {
             let result = async {
-                let cfg = mcp::load_config_with_workspace(&path, &app.workspace)?;
+                let cfg = mcp::load_config_with_workspace_and_plugins(
+                    &path,
+                    &app.workspace,
+                    app.plugin_registry.as_ref(),
+                )?;
                 let server = cfg
                     .servers
                     .get(&name)
@@ -10112,7 +10122,11 @@ async fn handle_mcp_ui_action(
         }
         crate::tui::app::McpUiAction::Logout { name } => {
             let result = (|| {
-                let cfg = mcp::load_config_with_workspace(&path, &app.workspace)?;
+                let cfg = mcp::load_config_with_workspace_and_plugins(
+                    &path,
+                    &app.workspace,
+                    app.plugin_registry.as_ref(),
+                )?;
                 let server = cfg
                     .servers
                     .get(&name)
@@ -10146,18 +10160,20 @@ async fn handle_mcp_ui_action(
         let network_policy = config.network.clone().map(|toml_cfg| {
             crate::network_policy::NetworkPolicyDecider::with_default_audit(toml_cfg.into_runtime())
         });
-        mcp::discover_manager_snapshot_with_workspace(
+        mcp::discover_manager_snapshot_with_workspace_and_plugins(
             &path,
             &app.workspace,
             network_policy,
             app.mcp_restart_required,
+            std::sync::Arc::clone(&app.plugin_registry),
         )
         .await
     } else {
-        mcp::manager_snapshot_from_config_with_workspace(
+        mcp::manager_snapshot_from_config_with_workspace_and_plugins(
             &path,
             &app.workspace,
             app.mcp_restart_required,
+            app.plugin_registry.as_ref(),
         )
     };
 

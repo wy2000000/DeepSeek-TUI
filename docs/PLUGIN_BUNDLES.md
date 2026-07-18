@@ -80,6 +80,12 @@ configuration are not inherited ambiently. Absolute arguments and parent
 traversal are rejected; contained bundle entrypoints are frozen to their
 staged paths before spawn.
 
+Every stdio argument is shown losslessly as a JSON string during review.
+Common credential-bearing flags and known literal token shapes are rejected
+from argv; credentials must instead use a reviewed environment mapping.
+Plugin-contributed MCP OAuth is disabled for v0.9.1, including discovery,
+login, refresh, and token storage.
+
 `[skills]` and `[mcp_servers.*]` are the only active component adapters in
 v0.9.1. The manifest can inventory the following future surfaces, but a bundle
 declaring any of them cannot be enabled yet:
@@ -182,7 +188,9 @@ the host, free of validation errors, and limited to supported component kinds.
   before releasing content and fails closed on drift. Queued messages persist
   the same provenance and repeat that check at dispatch. `/skills inspect`
   identifies the reviewed bundle without exposing its mutable source path.
-- MCP server names are exposed as `<plugin>-<server>`. Disabled or untrusted
+- MCP server names are exposed as
+  `plugin-<plugin-name-byte-length>-<plugin>-<server>` so hyphens in either
+  component cannot create an authority collision. Disabled or untrusted
   bundles are denied again at the headless MCP adapter. Authority is checked
   before connection, immediately before every lazy stdio spawn, after
   transport construction, before each tool/resource/prompt operation, and
@@ -196,10 +204,11 @@ the host, free of validation errors, and limited to supported component kinds.
 
 `/plugin list`, `show`, and `validate` perform no network requests, process
 launches, credential reads, or configuration writes. Reviews render structural
-argv and environment provenance without values, and plugin-originated errors
-redact URL query, auth, argv, and environment material. Legacy executable tools
-under `[tools].plugin_dir` remain a distinct system and are listed under
-`/plugin tools`.
+argv as lossless JSON strings and environment provenance without values.
+Credential-bearing argv is rejected at manifest validation; plugin-originated
+errors suppress URL query, authentication, argv, and environment material.
+Legacy executable tools under `[tools].plugin_dir` remain a distinct system
+and are listed under `/plugin tools`.
 
 ## Explicit non-goals for v0.9.1
 

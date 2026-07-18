@@ -130,13 +130,42 @@ where
 /// secret-scrubbed child environment, remove ambient proxy variables whose
 /// URLs may themselves contain credentials, then apply only reviewed
 /// overrides. `NO_PROXY` remains safe routing metadata.
+#[cfg(test)]
 pub fn sanitized_plugin_mcp_env<I, K, V>(overrides: I) -> Vec<(OsString, OsString)>
 where
     I: IntoIterator<Item = (K, V)>,
     K: AsRef<OsStr>,
     V: AsRef<OsStr>,
 {
-    let mut env = sanitized_child_env(std::iter::empty::<(OsString, OsString)>());
+    sanitized_plugin_mcp_env_from(std::env::vars_os(), overrides)
+}
+
+/// Build a reviewed plugin child environment from an immutable host snapshot.
+///
+/// This is separate from [`sanitized_plugin_mcp_env`] so a repository-local
+/// dotenv file loaded after startup cannot add or replace inherited values.
+pub fn sanitized_plugin_mcp_env_from<B, BK, BV, I, K, V>(
+    base_environment: B,
+    overrides: I,
+) -> Vec<(OsString, OsString)>
+where
+    B: IntoIterator<Item = (BK, BV)>,
+    BK: AsRef<OsStr>,
+    BV: AsRef<OsStr>,
+    I: IntoIterator<Item = (K, V)>,
+    K: AsRef<OsStr>,
+    V: AsRef<OsStr>,
+{
+    let mut env = Vec::new();
+    for (key, value) in base_environment {
+        if is_allowed_parent_env_key(key.as_ref()) {
+            upsert_env(
+                &mut env,
+                key.as_ref().to_os_string(),
+                value.as_ref().to_os_string(),
+            );
+        }
+    }
     env.retain(|(key, _)| {
         !matches!(
             normalize_key(key).as_str(),

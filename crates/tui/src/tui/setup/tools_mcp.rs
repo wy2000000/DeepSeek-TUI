@@ -191,7 +191,11 @@ fn mcp_inventory(app: &App, project_mcp_path: &Path) -> McpInventoryRow {
         return mcp_snapshot_inventory(snapshot, &app.mcp_config_path, project_mcp_path);
     }
 
-    match crate::mcp::load_config_with_workspace(&app.mcp_config_path, &app.workspace) {
+    match crate::mcp::load_config_with_workspace_and_plugins(
+        &app.mcp_config_path,
+        &app.workspace,
+        app.plugin_registry.as_ref(),
+    ) {
         Ok(cfg) => mcp_config_inventory(&app.mcp_config_path, project_mcp_path, &cfg),
         Err(_) => McpInventoryRow {
             status: InventoryStatus::NeedsConfig,
@@ -755,6 +759,18 @@ mod tests {
         .expect("manifest");
 
         let mut app = test_app(tmp.path(), None, mcp_path, skills_dir);
+        let discovery_config = crate::plugins::discovery::DiscoveryConfig {
+            workspace: tmp.path().to_path_buf(),
+            user_plugins_dir: plugins_dir,
+            workspace_plugins_dir: tmp.path().join("workspace-plugins-unused"),
+            builtin_plugin_dirs: Vec::new(),
+            state_path: home.join("plugins/state.json"),
+        };
+        let discovery = crate::plugins::PluginDiscoveryContext::from_config_and_environment(
+            &discovery_config,
+            crate::plugins::HostEnvironment::default(),
+        );
+        app.plugin_registry = discovery.registry_for_workspace(tmp.path());
         // Simulate the same skill registration Hotbar uses at startup.
         app.cached_skills = vec![("alpha".into(), "alpha skill".into())];
         app.hotbar_actions = HotbarActionRegistry::with_builtins();

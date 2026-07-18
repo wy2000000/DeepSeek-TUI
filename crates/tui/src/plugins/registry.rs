@@ -63,6 +63,7 @@ pub struct PluginRegistry {
     state_path: Option<PathBuf>,
     state_error: Option<String>,
     workspace: PathBuf,
+    discovery_context: Option<std::sync::Arc<super::context::PluginDiscoveryContext>>,
 }
 
 impl PluginRegistry {
@@ -71,11 +72,22 @@ impl PluginRegistry {
         Self::default()
     }
 
+    /// Construct a fail-closed registry for a workspace without consulting
+    /// process environment or filesystem discovery roots.
+    #[must_use]
+    pub fn empty(workspace: &Path) -> Self {
+        Self {
+            workspace: workspace.to_path_buf(),
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn from_discovery(
         plugins: Vec<LoadedPlugin>,
         mut diagnostics: Vec<PluginDiagnostic>,
         state_path: PathBuf,
         workspace: PathBuf,
+        discovery_context: Option<std::sync::Arc<super::context::PluginDiscoveryContext>>,
     ) -> Self {
         let (state, state_error) = match load_state(&state_path) {
             Ok(state) => (state, None),
@@ -96,6 +108,7 @@ impl PluginRegistry {
             state_path: Some(state_path),
             state_error,
             workspace,
+            discovery_context,
         };
         for plugin in plugins {
             registry.register_loaded(plugin);
@@ -135,12 +148,64 @@ impl PluginRegistry {
                 staged_bundle_matches(&staged_root, &plugin.content_hash, &plugin.capability_hash)
                     .then_some(staged_root)
             });
+            if let Some(staged_root) = plugin.staged_root.clone() {
+                match super::discovery::load_staged_skill_snapshots(
+                    &staged_root,
+                    &plugin.content_hash,
+                    &plugin.capability_hash,
+                ) {
+                    Ok(snapshots) => plugin.skill_snapshots = snapshots,
+                    Err(error) => {
+                        plugin.staged_root = None;
+                        plugin.enabled = false;
+                        plugin.diagnostics.push(PluginDiagnostic::error(
+                            "staged-skill-invalid",
+                            format!("Plugin runtime Skill snapshot is fail-closed: {error}"),
+                            Some(staged_root),
+                        ));
+                    }
+                }
+            }
         }
     }
 
     #[must_use]
     pub fn workspace(&self) -> &Path {
         &self.workspace
+    }
+
+    /// Re-discover for a new workspace using the immutable pre-dotenv roots
+    /// and environment. Registries without a context are test/ad-hoc values
+    /// and remain fail-closed instead of consulting ambient process state.
+    #[must_use]
+    pub fn rediscover_for_workspace(&self, workspace: &Path) -> std::sync::Arc<Self> {
+        self.discovery_context.as_ref().map_or_else(
+            || std::sync::Arc::new(Self::empty(workspace)),
+            |context| context.registry_for_workspace(workspace),
+        )
+    }
+
+    #[must_use]
+    pub fn host_environment(&self) -> Option<std::sync::Arc<super::context::HostEnvironment>> {
+        self.discovery_context
+            .as_ref()
+            .map(|context| context.host_environment())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_skill_snapshots_for_test(
+        &mut self,
+        selector: &str,
+        snapshots: Vec<super::types::PluginSkillSnapshot>,
+    ) {
+        let id = self
+            .resolve_id(selector)
+            .cloned()
+            .expect("test plugin exists");
+        self.plugins
+            .get_mut(&id)
+            .expect("test plugin exists")
+            .skill_snapshots = snapshots;
     }
 
     #[must_use]
@@ -357,6 +422,7 @@ impl PluginRegistry {
         if let Some(parent) = lock_path.parent() {
             fs::create_dir_all(parent)
                 .map_err(|e| format!("failed to create plugin state directory: {e}"))?;
+            harden_plugin_state_directory(parent)?;
         }
         let lock_file = open_state_lock(&lock_path, true)?;
         let mut lock = fd_lock::RwLock::new(lock_file);
@@ -420,8 +486,12 @@ fn load_state_unlocked(path: &Path) -> Result<PluginStateFile, String> {
 }
 
 fn save_state(path: &Path, state: &PluginStateFile) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        harden_plugin_state_directory(parent)?;
+    }
     codewhale_config::persistence::atomic_write_json(path, state)
-        .map_err(|e| format!("failed to atomically persist {}: {e}", path.display()))
+        .map_err(|e| format!("failed to atomically persist {}: {e}", path.display()))?;
+    harden_plugin_state_file(path)
 }
 
 fn state_lock_path(path: &Path) -> PathBuf {
@@ -445,9 +515,31 @@ fn open_state_lock(path: &Path, create: bool) -> Result<fs::File, String> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    options
+    let file = options
         .open(path)
-        .map_err(|e| format!("failed to open plugin state lock: {e}"))
+        .map_err(|e| format!("failed to open plugin state lock: {e}"))?;
+    harden_plugin_state_file(path)?;
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn harden_plugin_state_directory(path: &Path) -> Result<(), String> {
+    set_windows_owner_only_acl(path)
+}
+
+#[cfg(not(windows))]
+fn harden_plugin_state_directory(_path: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(windows)]
+fn harden_plugin_state_file(path: &Path) -> Result<(), String> {
+    set_windows_owner_only_acl(path)
+}
+
+#[cfg(not(windows))]
+fn harden_plugin_state_file(_path: &Path) -> Result<(), String> {
+    Ok(())
 }
 
 fn runtime_stage_path(state_path: &Path, id: &PluginId, content_hash: &str) -> PathBuf {

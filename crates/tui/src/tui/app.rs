@@ -2600,8 +2600,22 @@ impl App {
         tr(self.ui_locale, id)
     }
 
-    #[allow(clippy::too_many_lines)]
+    #[cfg(test)]
     pub fn new(options: TuiOptions, config: &Config) -> Self {
+        let workspace = options.workspace.clone();
+        Self::new_with_plugin_registry(
+            options,
+            config,
+            std::sync::Arc::new(crate::plugins::PluginRegistry::empty(&workspace)),
+        )
+    }
+
+    #[allow(clippy::too_many_lines)]
+    pub fn new_with_plugin_registry(
+        options: TuiOptions,
+        config: &Config,
+        plugin_registry: std::sync::Arc<crate::plugins::PluginRegistry>,
+    ) -> Self {
         let TuiOptions {
             model,
             workspace,
@@ -2986,7 +3000,6 @@ impl App {
 
         let skills_scan_codewhale_only = config.skills_config().scan_codewhale_only();
         let skills_dir = resolve_skills_dir(&workspace, &global_skills_dir, config);
-        let plugin_registry = crate::plugins::registry_for_workspace(&workspace);
         let cached_skills = Self::discover_cached_skills(
             &workspace,
             &skills_dir,
@@ -3012,10 +3025,13 @@ impl App {
                 }
                 _ => (String::new(), 0, false),
             };
-        let mcp_configured_count =
-            crate::mcp::load_config_with_workspace(&mcp_config_path, &workspace)
-                .map(|cfg| cfg.servers.len())
-                .unwrap_or(0);
+        let mcp_configured_count = crate::mcp::load_config_with_workspace_and_plugins(
+            &mcp_config_path,
+            &workspace,
+            plugin_registry.as_ref(),
+        )
+        .map(|cfg| cfg.servers.len())
+        .unwrap_or(0);
         let mut hotbar_actions = HotbarActionRegistry::with_configured_routes(
             config,
             provider,
