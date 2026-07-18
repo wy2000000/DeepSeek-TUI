@@ -565,11 +565,10 @@ fn escape_review_text(value: &str) -> String {
 }
 
 fn review_token(plugin: &LoadedPlugin) -> String {
-    format!(
-        "{}.{}",
-        &plugin.content_hash[..12],
-        &plugin.capability_hash[..12]
-    )
+    // This is an explicit user confirmation, not cosmetic display text. Bind
+    // the command to both complete SHA-256 receipts so a same-inventory bundle
+    // cannot collide through the former 48-bit content prefix.
+    format!("{}.{}", plugin.content_hash, plugin.capability_hash)
 }
 
 fn append_diagnostics(
@@ -889,9 +888,33 @@ network_hosts = ["example.invalid"]
             .lines()
             .find(|line| line.starts_with("/plugin trust demo "))
             .unwrap();
+        let token = confirmation
+            .split_whitespace()
+            .last()
+            .expect("review confirmation token");
+        let (content_digest, capability_digest) = token
+            .split_once('.')
+            .expect("content and capability digests");
+        assert_eq!(content_digest.len(), 64);
+        assert_eq!(capability_digest.len(), 64);
+        assert!(content_digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert!(
+            capability_digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        );
         assert!(!app.plugin_registry.get("demo").unwrap().trusted());
 
         assert!(plugins(&mut app, Some("trust demo wrong")).is_error);
+        let shortened = format!(
+            "trust demo {}.{}",
+            &content_digest[..12],
+            &capability_digest[..12]
+        );
+        assert!(
+            plugins(&mut app, Some(&shortened)).is_error,
+            "the legacy 48-bit content prefix must not authorize trust"
+        );
         let arg = confirmation.trim_start_matches("/plugin ");
         assert!(!plugins(&mut app, Some(arg)).is_error);
         assert!(!plugins(&mut app, Some("enable demo")).is_error);

@@ -136,12 +136,14 @@ requested permissions, sanitized MCP endpoints, full content and capability
 hashes, and inactive declarations. It also prints an exact confirmation:
 
 ```text
-/plugin trust example <content-prefix>.<capability-prefix>
+/plugin trust example <full-content-sha256>.<full-capability-sha256>
 ```
 
-Run that exact command only after reviewing the bundle. Trust first copies the
-complete reviewed tree into a Codewhale-owned, content-addressed runtime
-snapshot and records the matching receipt; it does not activate anything.
+Run that exact command only after reviewing the bundle. The confirmation token
+uses both complete SHA-256 receipts rather than display prefixes. Trust first
+copies the complete reviewed tree into a Codewhale-owned, content-addressed
+runtime snapshot and records the matching receipt; it does not activate
+anything.
 Then run `/plugin enable example` again. Trust and enablement are separate:
 
 - `/plugin disable example` stops contribution while preserving trust.
