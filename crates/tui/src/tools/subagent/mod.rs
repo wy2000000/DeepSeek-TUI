@@ -9246,7 +9246,8 @@ impl SubAgentToolRegistry {
         todo_list: SharedTodoList,
         plan_state: SharedPlanState,
     ) -> Self {
-        // Build the full agent surface — same as the parent's Agent mode.
+        // Build the full agent surface — same as the parent's Agent mode except
+        // for root-owned goal lifecycle mutation.
         // Children inherit shell, file, patch, search, web, git, diagnostics,
         // review, and RLM, plus per-child fresh todo/plan state. `agent` is
         // retained only when depth budget remains.
@@ -9268,7 +9269,13 @@ impl SubAgentToolRegistry {
             registry = registry.with_mcp_tools(std::sync::Arc::clone(pool));
         }
 
-        let registry = registry.build(context);
+        let mut registry = registry.build(context);
+        // Children may inspect the parent goal for context, but only the root
+        // agent may create or transition that shared lifecycle. Removing the
+        // mutators after all built-in and MCP registrations also prevents an
+        // accidental name collision from restoring child authority.
+        registry.remove_tool("create_goal");
+        registry.remove_tool("update_goal");
 
         Self {
             allowed_tools: explicit_allowed_tools,

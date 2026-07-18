@@ -1980,7 +1980,8 @@ fn refresh_system_prompt_uses_runtime_goal_state() {
     let (mut engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
     {
         let mut goal = engine.config.goal_state.lock().expect("goal lock");
-        goal.create("Close the runtime goal loop".to_string(), None);
+        goal.create("Close the runtime goal loop".to_string(), None)
+            .expect("create goal");
     }
 
     engine.refresh_system_prompt();
@@ -2003,7 +2004,8 @@ async fn runtime_goal_updates_emit_ui_snapshot() {
     let (engine, handle) = Engine::new(EngineConfig::default(), &Config::default());
     {
         let mut goal = engine.config.goal_state.lock().expect("goal lock");
-        goal.create("Ship the release lane".to_string(), Some(42_000));
+        goal.create("Ship the release lane".to_string(), Some(42_000))
+            .expect("create goal");
         goal.mark_complete(
             "verified with focused tests".to_string(),
             crate::tools::goal::GoalCompletionVerification {
@@ -6581,7 +6583,8 @@ fn turn_metadata_surfaces_context_and_resource_usage() {
     });
     {
         let mut goal = engine.config.goal_state.lock().expect("goal lock");
-        goal.create("Finish telemetry visibility".to_string(), Some(2_000));
+        goal.create("Finish telemetry visibility".to_string(), Some(2_000))
+            .expect("create goal");
         goal.record_usage(1_000, 100);
     }
 

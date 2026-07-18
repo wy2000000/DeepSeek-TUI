@@ -3021,19 +3021,24 @@ fn subagent_auto_reasoning_resolves_to_distinct_v4_tiers() {
 #[test]
 fn test_subagent_tool_registry_reports_unavailable_tools() {
     let tmp = tempdir().expect("tempdir");
-    let mut runtime = stub_runtime();
+    let mut runtime =
+        stub_runtime().with_agent_tool_surface_options(enabled_agent_surface_options());
     runtime.context = ToolContext::new(tmp.path().to_path_buf());
     runtime.allow_shell = false;
     let registry = SubAgentToolRegistry::new(
         runtime,
         SubAgentType::Explore,
-        Some(vec!["read_file".to_string(), "missing_tool".to_string()]),
+        Some(vec![
+            "read_file".to_string(),
+            "update_goal".to_string(),
+            "missing_tool".to_string(),
+        ]),
         Arc::new(Mutex::new(TodoList::new())),
         Arc::new(Mutex::new(PlanState::default())),
     );
     assert_eq!(
         registry.unavailable_allowed_tools(),
-        vec!["missing_tool".to_string()]
+        vec!["update_goal".to_string(), "missing_tool".to_string()]
     );
 }
 
@@ -3096,7 +3101,7 @@ fn disabled_feature_agent_surface_options() -> AgentToolSurfaceOptions {
 }
 
 #[test]
-fn subagent_general_catalog_matches_parent_agent_surface_when_features_enabled() {
+fn subagent_general_catalog_keeps_parent_surface_except_root_goal_mutators() {
     let tmp = tempdir().expect("tempdir");
     let mut runtime =
         stub_runtime().with_agent_tool_surface_options(enabled_agent_surface_options());
@@ -3120,9 +3125,20 @@ fn subagent_general_catalog_matches_parent_agent_surface_when_features_enabled()
 
     let parent_names = tool_names(parent_registry.to_api_tools());
     let child_names = tool_names(child_registry.tools_for_model(&SubAgentType::General));
+    let expected_child_names = parent_names
+        .iter()
+        .filter(|name| !matches!(name.as_str(), "create_goal" | "update_goal"))
+        .cloned()
+        .collect::<HashSet<_>>();
+
+    assert!(parent_names.contains("create_goal"));
+    assert!(parent_names.contains("update_goal"));
+    assert!(child_names.contains("get_goal"));
+    assert!(!child_names.contains("create_goal"));
+    assert!(!child_names.contains("update_goal"));
     assert_eq!(
-        child_names, parent_names,
-        "default General sub-agent catalog must stay in parity with the parent Agent surface"
+        child_names, expected_child_names,
+        "default General sub-agent catalog must match the parent Agent surface except for root-owned goal mutators"
     );
 }
 
