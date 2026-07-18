@@ -1265,6 +1265,7 @@ fn link_style() -> Style {
 fn char_display_width(ch: char, col: usize) -> usize {
     match ch {
         '\t' => 8 - (col % 8), // advance to next 8-column tab stop
+        '\u{20E3}' => 1,       // COMBINING ENCLOSING KEYCAP
         _ => ch.width().unwrap_or(1),
     }
 }

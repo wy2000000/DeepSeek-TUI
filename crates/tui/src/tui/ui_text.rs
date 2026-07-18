@@ -36,7 +36,7 @@ pub(crate) fn truncate_line_to_width(text: &str, max_width: usize) -> String {
         let mut out = String::new();
         let mut width = 0usize;
         for ch in text.chars() {
-            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+            let ch_width = char_display_width(ch);
             if width + ch_width > max_width {
                 break;
             }
@@ -50,7 +50,7 @@ pub(crate) fn truncate_line_to_width(text: &str, max_width: usize) -> String {
     let mut width = 0usize;
     let limit = max_width.saturating_sub(3);
     for ch in text.chars() {
-        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        let ch_width = char_display_width(ch);
         if width + ch_width > limit {
             break;
         }
@@ -290,6 +290,13 @@ pub(super) fn slice_text(text: &str, start: usize, end: usize) -> String {
 pub(super) fn char_display_width(ch: char) -> usize {
     if ch == '\t' {
         4
+    } else if ch == '\u{20E3}' {
+        // U+20E3 COMBINING ENCLOSING KEYCAP completes a keycap sequence
+        // (e.g. 1️⃣ = 1️⃣) that renders as 2 columns
+        // in terminals, but unicode-width reports it as 1 (base = 1,
+        // FE0F = 0, 20E3 = 0). Giving 20E3 a display width of 1 makes
+        // the total 2, matching the terminal.
+        1
     } else {
         // `width()` returns `None` for control/unassigned chars (default them to
         // one column so layout doesn't collapse) and `Some(0)` for genuinely
@@ -536,6 +543,54 @@ mod tests {
                 !out.contains('\u{FFFD}'),
                 "width={width}: truncation split a wide glyph"
             );
+        }
+    }
+
+    // --- keycap / enclosing-keycap regression guard (#4479) -------------------
+    // Keycap sequences (digit + FE0F + U+20E3) render as 2 columns in Windows
+    // Terminal but were measured as 1 column by char_display_width. Proof that
+    // every code path listed below returns 2 after the fix.
+
+    #[test]
+    fn text_display_width_treats_keycap_sequence_as_two_columns() {
+        assert_eq!(text_display_width("1\u{fe0f}\u{20e3}"), 2);
+        assert_eq!(text_display_width("9\u{fe0f}\u{20e3}"), 2);
+        // Without FE0F: digit + enclosing keycap still renders as a single
+        // keycap on many terminals (2 cols).
+        assert_eq!(text_display_width("1\u{20e3}"), 2);
+        assert_eq!(text_display_width("#\u{fe0f}\u{20e3}"), 2);
+        // Independent enclosing keycap codepoint: we give it 1 col to err
+        // on the safe side (extra space over cell collapse).
+        assert_eq!(text_display_width("\u{20e3}"), 1);
+    }
+
+    #[test]
+    fn slice_text_does_not_split_keycap_sequence() {
+        // Slicing a row that contains a keycap must keep the sequence intact.
+        let row = "step 1\u{fe0f}\u{20e3} done";
+        // Slice from column 0 to 6 display-width cols.
+        let sliced = slice_text(row, 0, 6);
+        assert!(sliced.contains("1\u{fe0f}\u{20e3}"),
+            "keycap was split: {sliced:?}");
+        assert_eq!(UnicodeWidthStr::width(sliced.as_str()), 6,
+            "slice width {sliced:?} != 6");
+    }
+
+    #[test]
+    fn truncate_line_to_width_always_stays_within_budget_with_keycap() {
+        // Budgets from zero through wide, with and without surrounding text.
+        let cases = [
+            "1\u{fe0f}\u{20e3}",
+            "A 1\u{fe0f}\u{20e3} B",
+            "step 2\u{fe0f}\u{20e3} and 3\u{fe0f}\u{20e3} continue",
+        ];
+        for text in &cases {
+            for budget in 0..=text.chars().count() + 4 {
+                let out = truncate_line_to_width(text, budget);
+                let w = UnicodeWidthStr::width(out.as_str());
+                assert!(w <= budget,
+                    "budget={budget} text={text:?} -> {out:?} (width={w})");
+            }
         }
     }
 }
