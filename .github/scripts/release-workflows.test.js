@@ -42,6 +42,23 @@ assert.match(candidate, /^  workflow_dispatch:\n    inputs:\n      expected_sha:
 assert.doesNotMatch(candidate, /^  (push|pull_request|schedule):/m);
 assert.match(candidate, /uses: \.\/\.github\/workflows\/release-artifacts\.yml/);
 assert.match(candidate, /source_sha: \$\{\{ needs\.resolve\.outputs\.sha \}\}/);
+assert.match(candidate, /^  web:\n/m);
+assert.match(candidate, /ref: \$\{\{ needs\.resolve\.outputs\.sha \}\}/);
+assert.match(candidate, /working-directory: web/);
+for (const command of [
+  "npm ci",
+  "npm run check:facts",
+  "npm run prebuild",
+  "npm run check:docs",
+  "npm test",
+  "npm run lint",
+  "npx tsc --noEmit",
+  "npm run build",
+]) {
+  assert.match(candidate, new RegExp(`run: ${command.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&")}`));
+}
+assert.match(candidate, /^    needs: \[resolve, web\]$/m);
+assert.match(candidate, /needs\.web\.result == 'success'/);
 
 for (const [label, workflow] of [
   ["release candidate", candidate],

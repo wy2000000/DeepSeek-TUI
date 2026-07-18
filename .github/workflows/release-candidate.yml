@@ -71,9 +71,43 @@ jobs:
       - name: Reconfirm clean source snapshot
         run: git diff --exit-code
 
-  artifacts:
+  web:
+    name: Verify exact candidate web surface
     needs: resolve
     if: ${{ !cancelled() && needs.resolve.result == 'success' }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install web dependencies
+        run: npm ci
+      - name: Check public facts drift
+        run: npm run check:facts
+      - name: Generate derived facts
+        run: npm run prebuild
+      - name: Check public docs parity
+        run: npm run check:docs
+      - name: Run web tests
+        run: npm test
+      - name: Run web lint
+        run: npm run lint
+      - name: Run web type check
+        run: npx tsc --noEmit
+      - name: Build production web surface
+        run: npm run build
+
+  artifacts:
+    needs: [resolve, web]
+    if: ${{ !cancelled() && needs.resolve.result == 'success' && needs.web.result == 'success' }}
     uses: ./.github/workflows/release-artifacts.yml
     with:
       source_sha: ${{ needs.resolve.outputs.sha }}
