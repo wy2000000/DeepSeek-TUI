@@ -183,6 +183,51 @@ pub struct JobRecord {
     pub updated_at: i64,
 }
 
+/// Map a durable [`JobRecord`] to the dependency-neutral run read model.
+///
+/// Pure projection of the record as persisted: unknown budgets stay unset and
+/// nothing is fabricated. `updated_at` (epoch seconds) provides the terminal
+/// timestamp because the job manager records no separate end time.
+#[must_use]
+pub fn job_record_to_agent_run(
+    record: &JobRecord,
+) -> codewhale_protocol::agent_run::AgentRunSnapshot {
+    use codewhale_protocol::agent_run::{
+        AgentRunSnapshot, BudgetSummary, RunSource, RunState, TerminalOutcome, TerminalSummary,
+    };
+
+    let (state, terminal) = match record.status {
+        JobStatus::Queued => (RunState::Queued, None),
+        JobStatus::Running => (RunState::Running, None),
+        JobStatus::Paused => (RunState::Paused, None),
+        JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled => {
+            let outcome = match record.status {
+                JobStatus::Completed => TerminalOutcome::Completed,
+                JobStatus::Failed => TerminalOutcome::Failed,
+                _ => TerminalOutcome::Cancelled,
+            };
+            (
+                RunState::Terminal,
+                Some(TerminalSummary {
+                    outcome,
+                    ended_at_ms: record.updated_at.checked_mul(1000),
+                    detail: record.detail.clone(),
+                }),
+            )
+        }
+    };
+
+    AgentRunSnapshot {
+        run_id: record.id.clone(),
+        parent: None,
+        source: RunSource::CoreJob,
+        state,
+        budget: BudgetSummary::default(),
+        terminal,
+        refs: Vec::new(),
+    }
+}
+
 /// Manages background jobs with retry logic and persistence.
 #[derive(Debug, Default)]
 pub struct JobManager {
@@ -2899,6 +2944,96 @@ mod tests {
         let jobs = reloaded.list();
         let reloaded_job = jobs.iter().find(|job| job.id == id).unwrap();
         assert_eq!(reloaded_job.status, JobStatus::Paused);
+    }
+
+    // ── O1: JobRecord → AgentRunSnapshot adapter ────────────────────────
+
+    fn sample_job_record(status: JobStatus, detail: Option<&str>) -> JobRecord {
+        JobRecord {
+            id: "job-o1-1".to_string(),
+            name: "sample".to_string(),
+            status,
+            progress: None,
+            detail: detail.map(str::to_string),
+            retry: JobRetryMetadata {
+                attempt: 0,
+                max_attempts: DEFAULT_JOB_MAX_ATTEMPTS,
+                backoff_base_ms: DEFAULT_JOB_BACKOFF_BASE_MS,
+                next_backoff_ms: 0,
+                next_retry_at: None,
+            },
+            history: Vec::new(),
+            created_at: 1_700_000_000,
+            updated_at: 1_700_000_042,
+        }
+    }
+
+    #[test]
+    fn job_record_to_agent_run_maps_non_terminal_states() {
+        use codewhale_protocol::agent_run::RunState;
+
+        for (status, expected) in [
+            (JobStatus::Queued, RunState::Queued),
+            (JobStatus::Running, RunState::Running),
+            (JobStatus::Paused, RunState::Paused),
+        ] {
+            let snapshot = job_record_to_agent_run(&sample_job_record(status, None));
+            assert!(snapshot.is_coherent());
+            assert_eq!(snapshot.run_id, "job-o1-1");
+            assert_eq!(snapshot.parent, None);
+            assert_eq!(
+                snapshot.source,
+                codewhale_protocol::agent_run::RunSource::CoreJob
+            );
+            assert_eq!(snapshot.state, expected);
+            assert!(snapshot.terminal.is_none());
+            assert!(snapshot.refs.is_empty());
+            assert_eq!(
+                snapshot.budget,
+                codewhale_protocol::agent_run::BudgetSummary::default()
+            );
+        }
+    }
+
+    #[test]
+    fn job_record_to_agent_run_maps_terminal_states_without_fabricating_budget() {
+        use codewhale_protocol::agent_run::{RunState, TerminalOutcome};
+
+        let cases = [
+            (
+                JobStatus::Completed,
+                TerminalOutcome::Completed,
+                Some("done"),
+            ),
+            (JobStatus::Failed, TerminalOutcome::Failed, Some("boom")),
+            (JobStatus::Cancelled, TerminalOutcome::Cancelled, None),
+        ];
+
+        for (status, outcome, detail) in cases {
+            let snapshot = job_record_to_agent_run(&sample_job_record(status, detail));
+            assert!(snapshot.is_coherent());
+            assert_eq!(snapshot.state, RunState::Terminal);
+            let terminal = snapshot.terminal.expect("terminal summary");
+            assert_eq!(terminal.outcome, outcome);
+            assert_eq!(terminal.ended_at_ms, Some(1_700_000_042_000));
+            assert_eq!(terminal.detail.as_deref(), detail);
+            assert_eq!(
+                snapshot.budget,
+                codewhale_protocol::agent_run::BudgetSummary::default()
+            );
+            assert!(snapshot.refs.is_empty());
+            assert_eq!(snapshot.parent, None);
+        }
+    }
+
+    #[test]
+    fn job_record_to_agent_run_omits_ended_at_on_updated_at_overflow() {
+        let mut record = sample_job_record(JobStatus::Completed, Some("ok"));
+        record.updated_at = i64::MAX;
+        let snapshot = job_record_to_agent_run(&record);
+        assert!(snapshot.is_coherent());
+        let terminal = snapshot.terminal.expect("terminal summary");
+        assert_eq!(terminal.ended_at_ms, None);
     }
 
     #[test]
